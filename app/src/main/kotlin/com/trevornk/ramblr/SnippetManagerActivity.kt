@@ -56,6 +56,21 @@ class SnippetManagerActivity : BaseSettingsActivity() {
         enabledRowSub = enabledRow.findViewWithTag("subtitle")
         root.addView(enabledRow)
 
+        val beforeCleanupSwitch = MaterialSwitch(this).apply {
+            isChecked = SnippetsBeforeCleanupToggle.isEnabled(this@SnippetManagerActivity)
+            isClickable = false
+        }
+        root.addView(settingsRow(
+            "Also apply before AI cleanup",
+            "Expand snippets in the transcript first, so cleanup reads the corrected words, and again in the final text",
+            beforeCleanupSwitch,
+            details = "Off by default. For snippets used as fixed replacements of words the transcriber gets wrong",
+        ) {
+            val newVal = !beforeCleanupSwitch.isChecked
+            SnippetsBeforeCleanupToggle.setEnabled(prefs(), newVal)
+            beforeCleanupSwitch.isChecked = newVal
+        })
+
         root.addView(TextView(this).apply {
             text = HELP_TEXT
             textSize = 13f

@@ -126,6 +126,17 @@ interface RuntimeListener {
      * Carries a coarse [BackgroundFailure], never the raw error (those can echo provider bodies).
      */
     fun onDictationFailed(failure: BackgroundFailure) {}
+
+    /**
+     * Whether this host can take a result some time after its dictation ended, possibly while the
+     * next one is being recorded (see [DictationQueue]): [deliverText] is then called with no
+     * session behind it and must insert where the cursor is at that moment. False keeps every
+     * dictation on the one-at-a-time path. Any thread.
+     */
+    fun supportsQueuedDelivery(): Boolean = false
+
+    /** The number of queued dictations still being processed changed. Main thread. */
+    fun onQueuedDictationsChanged(pending: Int) {}
 }
 
 /**
@@ -285,6 +296,14 @@ class DictationRuntime internal constructor(
     private val guard = TranscriptionGuard()
 
     /**
+     * Test seam, set only by the debug build's `DebugDeliverReceiver`: 16 kHz mono 16-bit PCM that
+     * takes the place of the next recording's audio, once, so everything after the microphone
+     * (upload, vocabulary, cleanup, insertion) can be checked on a device against a known clip.
+     * The file is deleted like a recording. Never set in a release build.
+     */
+    @Volatile internal var debugPcmOverride: File? = null
+
+    /**
      * Bounded partial wakelock across the recording+transcription window (M6 audit, 2026-08-26).
      * Screen-off long dictations otherwise risk the CPU being throttled mid local decode (the
      * multi-minute sherpa path), and OEM battery managers are quicker to silence the mic for an
@@ -400,6 +419,20 @@ class DictationRuntime internal constructor(
     internal val pipelineTiming = PipelineTimingSlot()
 
     private val handler = Handler(Looper.getMainLooper())
+
+    /** Dictations detached at the stop tap so the next one can start (see [DictationQueueToggle]). */
+    private val dictationQueue = DictationQueue(
+        context = context,
+        listener = listener,
+        handler = handler,
+        vocabularyTerms = { vocabularyTerms() },
+        cleanupPrompt = { vocabulary ->
+            PostProcessor.withKeepLanguage(PostProcessor.interpolateVocabulary(dictationStylePrompt(), vocabulary))
+        },
+        finalizeForDelivery = { finalizeForDelivery(it) },
+        userMessage = { toast(it) },
+        translationRequested = { KeyboardTranslation.target(context) != null },
+    )
 
     /** The currently-armed transcription watchdog (#L14), held so it can be removed on normal
      *  completion/teardown instead of one accumulating in the handler queue per dictation. */
@@ -1327,7 +1360,12 @@ class DictationRuntime internal constructor(
         token: Int,
         lease: DictationSessionLease,
     ) {
-        val file = result.pcmFile
+        // Debug builds can swap the recording for prepared audio once (see [debugPcmOverride]).
+        val file = debugPcmOverride?.let { prepared ->
+            debugPcmOverride = null
+            result.pcmFile?.delete()
+            prepared
+        } ?: result.pcmFile
         if (file == null) { reset("No audio captured", token, lease); return }
         if (result.errorMessage != null) Log.e(TAG, "Recording ended with error: ${result.errorMessage}")
 
@@ -1628,6 +1666,24 @@ class DictationRuntime internal constructor(
             return
         }
 
+        // Queued dictation: hand the audio over and go back to idle now, so the next recording can
+        // start while this one is transcribed and cleaned. The queue inserts the texts in order.
+        if (dictationQueue.accepts(candidates)) {
+            compressedFile?.delete() // the queue uploads the PCM as WAV
+            val correlationId = correlationIdFor(token)
+            handler.post {
+                if (!guard.isCurrent(token) || sessionLease !== lease) {
+                    file.delete() // cancelled or reset meanwhile
+                    return@post
+                }
+                // The stop-to-insert timeline belongs to the one-at-a-time path.
+                pipelineTiming.abandon()
+                dictationQueue.add(file, correlationId, candidates)
+                resetToIdle(lease)
+            }
+            return
+        }
+
         // M5: which compressed .m4a copy (if any) the walk still holds. A LOCAL candidate never
         // uploads, so its branch deletes the compressed copy and nulls this -- and now that LOCAL
         // can *fail through* to a later cloud candidate (see its branch below), that candidate
@@ -1899,10 +1955,13 @@ class DictationRuntime internal constructor(
     }
 
     private fun handleTranscriptionResult(
-        text: String?,
+        transcript: String?,
         token: Int,
         lease: DictationSessionLease,
     ) {
+        // Fixed replacements on the transcript itself, when the user asked for them there too
+        // (see [SnippetsBeforeCleanupToggle]); off by default, and then this is the transcript.
+        val text = transcript?.let { SnippetsBeforeCleanupToggle.apply(context, it) }
         if (text.isNullOrBlank()) {
             // H2 (#192): a no-speech dictation never reaches finishInjection -- abandon its
             // timing so a later unrelated injection (e.g. feedback-bubble raw-text retry) can't
@@ -2008,15 +2067,7 @@ class DictationRuntime internal constructor(
                 return
             }
 
-            val savedPrompt = PostProcessor.effectiveSavedPrompt(prefs().getString("post_processing_prompt", null), prefs().getString("cleanup_style", null))
-            val perAppPersonaKey = if (PerAppPersonaToggle.isEnabled(context)) {
-                PerAppPersonaStore.personaKeyFor(context, listener.foregroundPackageName())
-            } else {
-                null
-            }
-            val rawPrompt = perAppPersonaKey
-                ?.let { CleanupPersonas.promptForExplicitSelection(PersonaRegistry.resolve(context, it)) }
-                ?: savedPrompt
+            val rawPrompt = dictationStylePrompt()
             val vocabulary = vocabularyTerms()
             val prompt = if (translation != null && requestedTranslation != null) {
                 // The keyboard asked for a translation: the language clause replaces the
@@ -2050,6 +2101,7 @@ class DictationRuntime internal constructor(
                     // Translated output shares no words with the transcript, so the wording guard
                     // would reject every translation.
                     fidelityGuard = translation == null && PostProcessor.preservesWording(prompt),
+                    hardCapMs = CleanupTimeout.hardCapMs(context),
                 ) { result ->
                     handler.post {
                         if (!guard.isCurrent(token)) return@post // cancelled or watchdog already reset the UI
@@ -2094,6 +2146,20 @@ class DictationRuntime internal constructor(
                 resetToIdle(lease)
             }
         }
+    }
+
+    /** The cleanup prompt of the style in effect: the per-app style of the foreground app when
+     *  that feature is on and has one, else the saved style. Vocabulary not yet interpolated. */
+    private fun dictationStylePrompt(): String {
+        val savedPrompt = PostProcessor.effectiveSavedPrompt(prefs().getString("post_processing_prompt", null), prefs().getString("cleanup_style", null))
+        val perAppPersonaKey = if (PerAppPersonaToggle.isEnabled(context)) {
+            PerAppPersonaStore.personaKeyFor(context, listener.foregroundPackageName())
+        } else {
+            null
+        }
+        return perAppPersonaKey
+            ?.let { CleanupPersonas.promptForExplicitSelection(PersonaRegistry.resolve(context, it)) }
+            ?: savedPrompt
     }
 
     /** Marks whichever provider-chain cleanup step just served this cleanup call as healthy (#32), so the
@@ -2176,6 +2242,7 @@ class DictationRuntime internal constructor(
         if (recordingEngine != null) shutdownLeaseAwaitingReader = lease
         cancelCloudLiveAttempt()
         inFlightCall.cancel()
+        if (Looper.myLooper() == Looper.getMainLooper()) dictationQueue.shutdown() else handler.post { dictationQueue.shutdown() }
         stateMachine.reset()
         cancelWatchdog()
         guard.cancel()

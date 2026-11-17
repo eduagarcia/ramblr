@@ -16,6 +16,19 @@ val localProperties = Properties().apply {
 }
 val omniRouteBaseUrl: String = (localProperties.getProperty("OMNIROUTE_BASE_URL") ?: "").trim()
 
+// Optional, machine-local: keep the build outputs (and the native .cxx staging tree below) out of
+// the checkout, e.g. on a local disk when the checkout is on a network share, where compiling the
+// two native libraries is very slow. Set ramblr.buildRoot=/some/local/dir in local.properties.
+// Must run before anything below reads layout.buildDirectory.
+val ramblrBuildRoot: String = (localProperties.getProperty("ramblr.buildRoot") ?: "").trim()
+if (ramblrBuildRoot.isNotEmpty()) {
+    layout.buildDirectory.set(file("$ramblrBuildRoot/app-build"))
+}
+
+// Optional personal defaults (see PersonalDefaults.kt): personal/assets/ is gitignored because it
+// holds API keys. When it exists its files are packaged as assets; a public clone has none.
+val personalAssetsDir = rootProject.file("personal/assets")
+
 // onnxruntime for the sherpa-onnx speech-to-text native build (F-Droid prep, #36): the
 // official Microsoft artifact on Maven Central (a source F-Droid trusts, unlike GitHub
 // Releases). 1.24.3 is the exact version sherpa-onnx 1.13.3 builds/tests against (its
@@ -171,6 +184,9 @@ android {
     externalNativeBuild {
         cmake {
             path = file("src/main/cpp/CMakeLists.txt")
+            if (ramblrBuildRoot.isNotEmpty()) {
+                buildStagingDirectory = file("$ramblrBuildRoot/app-cxx")
+            }
         }
     }
 
@@ -204,6 +220,10 @@ android {
 
     buildFeatures { buildConfig = true }
 
+    if (personalAssetsDir.isDirectory) {
+        sourceSets.getByName("main").assets.srcDir(personalAssetsDir)
+    }
+
     testOptions {
         unitTests {
             isIncludeAndroidResources = true
@@ -221,6 +241,10 @@ android {
                 // `-Dramblr.writeModelCatalog=true` only reaches the Gradle daemon and
                 // ModelCatalogFileSyncTest's regeneration branch silently never fires, leaving
                 // you to hand-edit the very file the test exists to keep in sync.
+                // A developer's personal defaults (personal/assets/, see PersonalDefaults.kt) are
+                // packaged into the same merged assets the unit tests read; without this the tests
+                // would run against that developer's settings instead of the app's defaults.
+                it.systemProperty("ramblr.skipPersonalDefaults", "true")
                 it.systemProperty(
                     "ramblr.writeModelCatalog",
                     providers.systemProperty("ramblr.writeModelCatalog").getOrElse("false"),

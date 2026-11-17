@@ -145,6 +145,14 @@ data class ProviderChainEntry(
      * (OpenAI/Anthropic/Gemini/OmniRoute) -- those keep resolving exactly as before.
      */
     val presetId: String? = null,
+    /**
+     * Extra chat-completions request fields for this entry's CLEANUP calls, as a JSON object
+     * (e.g. `{"reasoning_effort":"low","service_tier":"priority","temperature":0.3}`), merged over
+     * the body [PostProcessor.buildRequestBody] builds. Lets an OpenAI-compatible gateway be told
+     * what the built-in body has no field for. Null for every entry saved before this existed.
+     * OPENAI and OMNIROUTE kinds only; the other kinds do not read it.
+     */
+    val extraBody: String? = null,
 )
 
 /**

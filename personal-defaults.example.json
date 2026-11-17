@@ -1,0 +1,36 @@
+{
+  "version": "1",
+  "skipOnboarding": true,
+  "language": "pt",
+  "transcription": {
+    "preset": "openrouter",
+    "baseUrl": "https://openrouter.ai/api/v1",
+    "model": "microsoft/mai-transcribe-2",
+    "apiKey": "sk-or-v1-..."
+  },
+  "cleanup": {
+    "baseUrl": "https://llm-gateway.example.com/v1",
+    "model": "gpt-6-luna",
+    "apiKey": "sk-...",
+    "extraBody": {
+      "reasoning_effort": "low",
+      "service_tier": "priority",
+      "temperature": 0.3
+    },
+    "timeoutMs": 30000
+  },
+  "cleanupStyle": {
+    "title": "My cleanup",
+    "subtitle": "Shown under the title in the style list",
+    "prompt": "Clean this speech-to-text transcript. Return only the cleaned transcript.\n\nVocabulary: write these terms exactly as listed when they are spoken.\n{{vocabulary_list}}"
+  },
+  "vocabulary": ["Claude Code", "OPNSense"],
+  "replacements": {
+    "btw": "by the way",
+    "Open Sense": "OPNSense"
+  },
+  "replacementsBeforeCleanup": true,
+  "prefs": {
+    "single_tap_restore_and_record_enabled": true
+  }
+}

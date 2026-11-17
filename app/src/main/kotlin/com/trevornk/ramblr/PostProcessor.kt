@@ -304,6 +304,14 @@ Output: The meeting has been moved to Thursday at 2 PM. Please confirm whether y
      */
     fun interpolateVocabulary(prompt: String, terms: List<String>): String =
         prompt.replace(VOCABULARY_PLACEHOLDER, vocabularyClause(terms))
+            .replace(VOCABULARY_LIST_PLACEHOLDER, terms.joinToString(", "))
+
+    /**
+     * Placeholder for a custom prompt that words its own vocabulary instruction: replaced by the
+     * bare comma-separated term list (empty when there are no terms), where [VOCABULARY_PLACEHOLDER]
+     * inserts the built-in sentence around the list.
+     */
+    const val VOCABULARY_LIST_PLACEHOLDER = "{{vocabulary_list}}"
 
     /**
      * Appended to every cloud cleanup prompt (#290). The built-in prompts are English, and with a
@@ -393,6 +401,7 @@ Output: The meeting has been moved to Thursday at 2 PM. Please confirm whether y
         prompt: String,
         model: String,
         omitTemperature: Boolean = rejectsTemperature(model.ifBlank { DEFAULT_MODEL }),
+        extraBody: String? = null,
     ): JSONObject {
         val messages = JSONArray().apply {
             put(JSONObject().apply {
@@ -410,8 +419,31 @@ Output: The meeting has been moved to Thursday at 2 PM. Please confirm whether y
             put("messages", messages)
             if (!omitTemperature) put("temperature", 0.0)
             put("stream", false)
+            mergeExtraBody(this, extraBody)
         }
     }
+
+    /**
+     * Copies the keys of [extraBody] (a JSON object, see [ProviderChainEntry.extraBody]) into
+     * [body], over whatever is there: this is how an entry sends `reasoning_effort`,
+     * `service_tier` or its own `temperature`. `model`, `messages` and `stream` are never taken
+     * from it, and text that is not a JSON object is ignored.
+     */
+    fun mergeExtraBody(body: JSONObject, extraBody: String?) {
+        val extra = parseExtraBody(extraBody) ?: return
+        for (key in extra.keys()) {
+            if (key in EXTRA_BODY_RESERVED_KEYS) continue
+            body.put(key, extra.get(key))
+        }
+    }
+
+    /** [raw] as a JSON object, or null when it is blank or not one. */
+    fun parseExtraBody(raw: String?): JSONObject? {
+        if (raw.isNullOrBlank()) return null
+        return try { JSONObject(raw) } catch (e: Exception) { null }
+    }
+
+    private val EXTRA_BODY_RESERVED_KEYS = setOf("model", "messages", "stream")
 
     /**
      * Provider-chain entry point for Phase 2 (#95). Every chain -- including a single OPENAI
@@ -462,6 +494,8 @@ Output: The meeting has been moved to Thursday at 2 PM. Please confirm whether y
         // Ceiling on a chunked on-device cleanup of `text`; see [CleanupWaterfallExecutor.execute].
         // Live dictation keeps the default, the audio-file path passes its own larger one.
         localStepBudgetMs: Long = LOCAL_CHUNKED_TOTAL_BUDGET_MS,
+        // Wall-clock budget of the whole waterfall; see [CleanupTimeout].
+        hardCapMs: Long = CLEANUP_WATERFALL_HARD_CAP_MS,
         callback: (Result) -> Unit,
     ) {
         val waterfall = ProviderChainRuntime.cleanupWaterfallFor(chain)
@@ -487,6 +521,7 @@ Output: The meeting has been moved to Thursday at 2 PM. Please confirm whether y
             benchmarkCorrelationId = benchmarkCorrelationId,
             fidelityGuard = fidelityGuard,
             localStepBudgetMs = localStepBudgetMs,
+            hardCapMs = hardCapMs,
             callback = callback,
         )
     }

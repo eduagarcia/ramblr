@@ -30,6 +30,7 @@ object ProviderChainStore {
                 put("useForCleanup", entry.useForCleanup)
                 // #275: preset marker, null for every entry saved before #275 shipped.
                 put("presetId", entry.presetId ?: JSONObject.NULL)
+                put("extraBody", entry.extraBody ?: JSONObject.NULL)
             })
         }
         return array.toString()
@@ -70,6 +71,7 @@ object ProviderChainStore {
                     // null both mean "no preset" -- same has()-first convention as
                     // transcriptionModel above.
                     presetId = if (!obj.has("presetId") || obj.isNull("presetId")) null else obj.getString("presetId"),
+                    extraBody = if (!obj.has("extraBody") || obj.isNull("extraBody")) null else obj.getString("extraBody"),
                 )
             }
             ProviderChain(entries)

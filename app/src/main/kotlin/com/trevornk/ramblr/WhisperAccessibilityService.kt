@@ -439,7 +439,9 @@ open class WhisperAccessibilityService : AccessibilityService() {
 
         override fun onIdleUi() {
             clearDictationTarget()
-            setBusy(false)
+            // Queued dictations (see DictationQueue) are still being processed: keep the spinner
+            // on the idle ring, which takes the next tap all the same.
+            setBusy(queuedDictations > 0)
             setAppearance(COLOR_IDLE)
             // Posted, not run inline: deliverText() has already posted this dictation's feedback
             // bubble, and the gate must see that bubble as showing rather than hide it.
@@ -522,6 +524,15 @@ open class WhisperAccessibilityService : AccessibilityService() {
 
         override fun foregroundPackageName(): String? = currentForegroundPackageName()
 
+        // A previewed result waits for the user in a bubble, one at a time; queued ones insert.
+        override fun supportsQueuedDelivery(): Boolean =
+            !PreviewBeforeInjectToggle.isEnabled(this@WhisperAccessibilityService)
+
+        override fun onQueuedDictationsChanged(pending: Int) {
+            queuedDictations = pending
+            if (runtime.currentState() == RecordingStateMachine.State.IDLE) setBusy(pending > 0)
+        }
+
         // "Translate to" is shared with the keyboard (one preference), so a dictation started from
         // the floating icon translates into the same language. Read once, when cleanup starts.
         override fun translationTarget(): String? {
@@ -560,6 +571,9 @@ open class WhisperAccessibilityService : AccessibilityService() {
     )
 
     internal var dictationTarget: DictationTarget? = null
+
+    /** Queued dictations not yet delivered (see [RuntimeListener.onQueuedDictationsChanged]). Main thread. */
+    private var queuedDictations = 0
 
     /** Translation bookkeeping for the in-flight dictation (see [runtimeListener]): a target was
      *  requested when cleanup started, the route could not carry it out, and the bubble text that

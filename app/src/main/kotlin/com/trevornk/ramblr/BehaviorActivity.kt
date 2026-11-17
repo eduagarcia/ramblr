@@ -35,6 +35,7 @@ class BehaviorActivity : BaseSettingsActivity() {
     private lateinit var singleTapRestoreSwitch: MaterialSwitch
     private lateinit var longPressCancelUndoSwitch: MaterialSwitch
     private lateinit var silenceAutoStopSwitch: MaterialSwitch
+    private lateinit var dictationQueueSwitch: MaterialSwitch
     private lateinit var silenceAutoStopRow: LinearLayout
     private lateinit var silenceAutoStopThresholdRow: LinearLayout
     /** Latest WorkManager state for the on-demand Silero VAD model download (#108), used to avoid
@@ -260,6 +261,21 @@ class BehaviorActivity : BaseSettingsActivity() {
         ) { promptSilenceAutoStopThreshold() }
         place(Section.DICTATION, 11, silenceAutoStopThresholdRow)
 
+        dictationQueueSwitch = MaterialSwitch(this).apply {
+            isChecked = DictationQueueToggle.isEnabled(this@BehaviorActivity)
+            isClickable = false
+        }
+        place(Section.DICTATION, 20, settingsRow(
+            "Queue dictations",
+            "Start the next dictation while the previous one is still being transcribed. The texts are inserted in order, where the cursor is",
+            dictationQueueSwitch,
+            details = "Off by default. Floating icon with cloud transcription only; a dictation that is translated, previewed live or previewed before inserting is not queued",
+        ) {
+            val newVal = !dictationQueueSwitch.isChecked
+            DictationQueueToggle.setEnabled(this, newVal)
+            dictationQueueSwitch.isChecked = newVal
+        })
+
         // Fallback restore path (#Feature B): if the icon is currently hidden -- including for
         // someone who turns the toggle above off while already hidden -- give them a way back
         // that doesn't depend on the notification still being around.
@@ -395,6 +411,7 @@ class BehaviorActivity : BaseSettingsActivity() {
         singleTapRestoreSwitch.isChecked = SingleTapRestoreToggle.isEnabled(this)
         longPressCancelUndoSwitch.isChecked = LongPressCancelUndoToggle.isEnabled(this)
         silenceAutoStopSwitch.isChecked = SilenceAutoStopToggle.isEnabled(this)
+        dictationQueueSwitch.isChecked = DictationQueueToggle.isEnabled(this)
         silenceAutoStopThresholdRow.findViewWithTag<TextView>("subtitle").text = silenceAutoStopThresholdSummary()
         refreshSilenceAutoStopSummary()
         vocabularyRowSub.text = VocabularyEditor.rowSummary(this)

@@ -4,6 +4,11 @@
 
 # Ramblr
 
+> **This is the `eduagarcia` fork.** It adds Microsoft MAI-Transcribe support (vocabulary and audio
+> format), extra request fields and a longer time budget for cleanup, a dictation queue, and
+> settings baked into a private build. See [docs/fork.md](docs/fork.md). The original project is
+> [trevornk/ramblr](https://github.com/trevornk/ramblr).
+
 **Speak it. Tap once, ramble, tap again — clean text lands wherever your cursor is.**
 
 Ramblr is an Android dictation app that puts a small floating mic on your screen. Tap it in any

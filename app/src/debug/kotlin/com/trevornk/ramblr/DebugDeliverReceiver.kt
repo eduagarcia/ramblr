@@ -40,11 +40,29 @@ import android.view.accessibility.AccessibilityNodeInfo
  * first 40 chars of text -- up to 4000 with `--ez full true`) under tag PhoneWhisper:
  *
  *     adb shell am broadcast -n com.trevornk.ramblr/.DebugDeliverReceiver -a com.trevornk.ramblr.DEBUG_DUMP
+ *
+ * Play an audio file of the app's own files directory through the media stream, so a real
+ * dictation (microphone, upload, cleanup, insertion) can be tested with nobody speaking: start a
+ * recording on the ring, play the clip from the phone's speaker, stop the recording.
+ * DEBUG_PLAY_STOP ends it early.
+ *
+ *     adb push clip.wav /data/local/tmp/ && adb shell run-as com.trevornk.ramblr cp /data/local/tmp/clip.wav files/
+ *     adb shell am broadcast -n com.trevornk.ramblr/.DebugDeliverReceiver \
+ *         -a com.trevornk.ramblr.DEBUG_PLAY --es file clip.wav
+ *
+ * Make the next dictation transcribe a prepared clip instead of what the microphone hears: a
+ * 16 kHz mono 16-bit WAV in the app's files directory replaces that one recording's audio after
+ * the stop tap (see `DictationRuntime.debugPcmOverride`). Everything after the microphone is the
+ * real path, and nothing has to be played aloud.
+ *
+ *     adb shell am broadcast -n com.trevornk.ramblr/.DebugDeliverReceiver \
+ *         -a com.trevornk.ramblr.DEBUG_NEXT_AUDIO --es file clip.wav
  */
 class DebugDeliverReceiver : BroadcastReceiver() {
     private companion object {
         var cloudNormalizer = CloudInterimNormalizer()
         var dumpFull = false
+        var player: android.media.MediaPlayer? = null
     }
 
     override fun onReceive(context: Context, intent: Intent) {
@@ -75,6 +93,54 @@ class DebugDeliverReceiver : BroadcastReceiver() {
                 service.maybeInjectPartial(shown, requireRecording = false, alreadyCased = true)
             }
             "com.trevornk.ramblr.DEBUG_PARTIAL_CANCEL" -> service.runtimeListener.onStreamingTeardown()
+            "com.trevornk.ramblr.DEBUG_PLAY" -> {
+                val name = intent.getStringExtra("file") ?: return
+                val file = java.io.File(context.filesDir, java.io.File(name).name)
+                player?.release()
+                player = try {
+                    android.media.MediaPlayer().apply {
+                        setAudioAttributes(
+                            android.media.AudioAttributes.Builder()
+                                .setUsage(android.media.AudioAttributes.USAGE_MEDIA)
+                                .setContentType(android.media.AudioAttributes.CONTENT_TYPE_SPEECH)
+                                .build()
+                        )
+                        setDataSource(file.absolutePath)
+                        setOnCompletionListener {
+                            Log.i("PhoneWhisper", "DEBUG_PLAY finished ${file.name}")
+                            it.release()
+                            if (player === it) player = null
+                        }
+                        prepare()
+                        start()
+                    }
+                } catch (e: Exception) {
+                    Log.w("PhoneWhisper", "DEBUG_PLAY could not play ${file.name}", e)
+                    null
+                }
+                if (player != null) Log.i("PhoneWhisper", "DEBUG_PLAY started ${file.name}")
+            }
+            "com.trevornk.ramblr.DEBUG_NEXT_AUDIO" -> {
+                val name = intent.getStringExtra("file") ?: return
+                val wav = java.io.File(context.filesDir, java.io.File(name).name)
+                try {
+                    val bytes = wav.readBytes()
+                    // PCM starts after the "data" chunk header; 44 for a plain WAV.
+                    val marker = "data".toByteArray()
+                    val at = (12 until bytes.size - 8).firstOrNull { i -> marker.indices.all { bytes[i + it] == marker[it] } }
+                    val start = if (at != null) at + 8 else 44
+                    val pcm = java.io.File(context.cacheDir, "debug_next_audio_${System.currentTimeMillis()}.pcm")
+                    pcm.writeBytes(bytes.copyOfRange(start, bytes.size))
+                    service.runtime.debugPcmOverride = pcm
+                    Log.i("PhoneWhisper", "DEBUG_NEXT_AUDIO armed ${wav.name} (${pcm.length()} PCM bytes)")
+                } catch (e: Exception) {
+                    Log.w("PhoneWhisper", "DEBUG_NEXT_AUDIO could not read ${wav.name}", e)
+                }
+            }
+            "com.trevornk.ramblr.DEBUG_PLAY_STOP" -> {
+                player?.release()
+                player = null
+            }
             "com.trevornk.ramblr.DEBUG_DUMP" -> {
                 val root = service.rootInActiveWindow ?: return
                 dumpFull = intent.getBooleanExtra("full", false)

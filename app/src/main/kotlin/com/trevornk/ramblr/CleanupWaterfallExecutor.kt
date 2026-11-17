@@ -698,6 +698,11 @@ object CleanupWaterfallExecutor {
         // Measured on-device pace, shared across chunked cleanups (and so across the pieces of one
         // audio job); see [LocalCleanupPaceStore]. Tests pass their own to stay independent.
         localPace: LocalCleanupPaceStore = LocalCleanupPaceStore.shared,
+        // Wall-clock budget of the whole waterfall. A caller raises it (see [CleanupTimeout]) for a
+        // model that needs longer than [CLEANUP_WATERFALL_HARD_CAP_MS] on a long transcript; a
+        // cloud step's read timeout then follows it, since a non-streamed completion sends nothing
+        // until it is whole.
+        hardCapMs: Long = CLEANUP_WATERFALL_HARD_CAP_MS,
         callback: (PostProcessor.Result) -> Unit,
     ) {
         val steps = waterfall.steps
@@ -714,7 +719,10 @@ object CleanupWaterfallExecutor {
         // from a previous dictation, and give the synchronous LOCAL_LLM step the same wall-clock
         // budget the between-step check below enforces.
         cancelHolder.beginWork()
-        val deadlineAtMs = startedAtMs + CLEANUP_WATERFALL_HARD_CAP_MS
+        val deadlineAtMs = startedAtMs + hardCapMs
+        val cloudBaseTimeouts = CleanupStepTimeouts.DEFAULT.let { base ->
+            if (hardCapMs > CLEANUP_WATERFALL_HARD_CAP_MS) base.copy(readMs = hardCapMs) else base
+        }
 
         fun nextGroupStart(index: Int): Int {
             val range = groupRanges.first { index in it }
@@ -737,12 +745,12 @@ object CleanupWaterfallExecutor {
                 callback(PostProcessor.Result(null, "Cleanup cancelled"))
                 return
             }
-            if (nowMs() - startedAtMs >= CLEANUP_WATERFALL_HARD_CAP_MS) {
+            if (nowMs() - startedAtMs >= hardCapMs) {
                 callback(PostProcessor.Result(null, "Cleanup waterfall exceeded time budget"))
                 return
             }
 
-            performStep(steps[index], text, prompt, localPrompt, localVocabulary, credentialLookup, entryCredentialLookup, transport, localInference, localModelPath, cancelHolder, deadlineAtMs, nowMs, temperatureCacheContext, isLastStep = index == steps.lastIndex, localStepBudgetMs = localStepBudgetMs, localPace = localPace) { stepOutcome ->
+            performStep(steps[index], text, prompt, localPrompt, localVocabulary, credentialLookup, entryCredentialLookup, transport, localInference, localModelPath, cancelHolder, deadlineAtMs, nowMs, temperatureCacheContext, isLastStep = index == steps.lastIndex, localStepBudgetMs = localStepBudgetMs, localPace = localPace, cloudBaseTimeouts = cloudBaseTimeouts) { stepOutcome ->
                 val outcome = if (fidelityGuard) guardCloudOutput(steps[index], text, stepOutcome) else stepOutcome
                 logStepOutcome(steps[index], startedAtMs, outcome, benchmarkContext, benchmarkCorrelationId)
                 when (outcome) {
@@ -1060,6 +1068,7 @@ object CleanupWaterfallExecutor {
         isLastStep: Boolean,
         localStepBudgetMs: Long,
         localPace: LocalCleanupPaceStore,
+        cloudBaseTimeouts: CleanupStepTimeouts = CleanupStepTimeouts.DEFAULT,
         callback: (CleanupStepOutcome) -> Unit,
     ) {
         // LOCAL_LLM branches before the credential check below: it's the one group with no
@@ -1115,7 +1124,7 @@ object CleanupWaterfallExecutor {
                 AnthropicCleanupProvider.ENDPOINT_URL,
                 AnthropicCleanupProvider.headers(apiKey),
                 AnthropicCleanupProvider.buildRequestBody(text, prompt, step.model).toString(),
-                cloudStepTimeouts(deadlineAtMs, nowMs()),
+                cloudStepTimeouts(deadlineAtMs, nowMs(), cloudBaseTimeouts),
                 cancelHolder,
             ) { httpOutcome -> callback(toStepOutcome(httpOutcome, AnthropicCleanupProvider::parseResponse)) }
             return
@@ -1142,7 +1151,7 @@ object CleanupWaterfallExecutor {
                 parse = GeminiCleanupProvider::parseResponse,
                 hasTemperature = { it.optJSONObject("generationConfig")?.has("temperature") == true },
                 removeTemperature = { it.optJSONObject("generationConfig")?.remove("temperature") },
-                timeoutMs = { cloudStepTimeouts(deadlineAtMs, nowMs()) },
+                timeoutMs = { cloudStepTimeouts(deadlineAtMs, nowMs(), cloudBaseTimeouts) },
                 callback = callback,
             )
             return
@@ -1163,7 +1172,7 @@ object CleanupWaterfallExecutor {
                 "", "stream=false", 0.0, step.entryId,
             )
         }
-        val initialBody = PostProcessor.buildRequestBody(text, prompt, step.model)
+        val initialBody = PostProcessor.buildRequestBody(text, prompt, step.model, extraBody = step.extraBody)
         val omitKnownUnsupported = temperatureStore != null && temperatureIdentity != null &&
             temperatureStore.state(temperatureIdentity) == TemperatureCapabilityStore.State.UNSUPPORTED
         if (omitKnownUnsupported) initialBody.remove("temperature")
@@ -1180,7 +1189,7 @@ object CleanupWaterfallExecutor {
             parse = PostProcessor::parseResponse,
             hasTemperature = { it.has("temperature") },
             removeTemperature = { it.remove("temperature") },
-            timeoutMs = { cloudStepTimeouts(deadlineAtMs, nowMs()) },
+            timeoutMs = { cloudStepTimeouts(deadlineAtMs, nowMs(), cloudBaseTimeouts) },
             callback = callback,
         )
     }

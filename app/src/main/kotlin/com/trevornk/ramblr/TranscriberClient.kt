@@ -74,12 +74,40 @@ object TranscriberClient {
      * own pure-ish decision point so the null-check that drives compressed-vs-raw upload format
      * is easy to read (and to unit test) independent of the network/multipart plumbing around it.
      */
-    fun uploadPart(pcmFile: File, compressedFile: File?): Pair<String, RequestBody> =
-        if (compressedFile != null) {
+    fun uploadPart(pcmFile: File, compressedFile: File?, model: String = DEFAULT_MODEL): Pair<String, RequestBody> =
+        if (compressedFile != null && acceptsCompressedUpload(model)) {
             COMPRESSED_FILENAME to compressedFile.asRequestBody(COMPRESSED_MEDIA_TYPE.toMediaType())
         } else {
             WAV_FILENAME to PcmWavRequestBody(pcmFile)
         }
+
+    /**
+     * Whether [model] is a Microsoft MAI-Transcribe model served through OpenRouter
+     * (`microsoft/mai-transcribe-2`). Two things differ from the OpenAI-family models:
+     *  - it refuses the `.m4a` (AAC) compressed upload with HTTP 400 `invalid_audio ... Format not
+     *    recognised`, and takes WAV or Ogg/Opus (see [acceptsCompressedUpload]);
+     *  - OpenRouter drops `prompt`/`keywords[]` for it, but forwards a `provider` form field to
+     *    Azure, whose `phraseList` is the vocabulary hint (see [vocabularyFormParts]).
+     * Both measured against the live API on 2026-11-17.
+     */
+    fun isMaiTranscribe(model: String): Boolean =
+        model.trim().lowercase().startsWith("microsoft/mai-transcribe")
+
+    /** False for models that refuse the compressed `.m4a` upload (#109); those always get WAV. */
+    fun acceptsCompressedUpload(model: String): Boolean = !isMaiTranscribe(model)
+
+    /**
+     * The `provider` form field that carries [terms] to MAI-Transcribe as an Azure phrase list:
+     * `{"options":{"azure":{"phraseList":{"phrases":[...]}}}}`, sent as text.
+     */
+    fun maiPhraseListProvider(terms: List<String>): String =
+        JSONObject().put(
+            "options",
+            JSONObject().put(
+                "azure",
+                JSONObject().put("phraseList", JSONObject().put("phrases", org.json.JSONArray(terms))),
+            ),
+        ).toString()
 
     /** Whether [model] supports the structured `keywords` array on `/v1/audio/transcriptions`
      *  (#114 follow-up, 2026-07-31): OpenAI documents `keywords[]` for the gpt-transcribe family
@@ -99,6 +127,7 @@ object TranscriberClient {
      */
     fun vocabularyFormParts(model: String, terms: List<String>): List<Pair<String, String>> = when {
         terms.isEmpty() -> emptyList()
+        isMaiTranscribe(model) -> listOf("provider" to maiPhraseListProvider(terms))
         supportsKeywords(model) -> terms.map { "keywords[]" to it }
         else -> listOf("prompt" to VocabularyTerms.asTranscriptionPrompt(terms))
     }
@@ -159,7 +188,7 @@ object TranscriberClient {
         for ((name, value) in vocabularyFormParts(model.ifBlank { DEFAULT_MODEL }, vocabularyTerms)) {
             bodyBuilder.addFormDataPart(name, value)
         }
-        val (filename, filePart) = uploadPart(pcmFile, compressedFile)
+        val (filename, filePart) = uploadPart(pcmFile, compressedFile, model.ifBlank { DEFAULT_MODEL })
         val body = bodyBuilder
             .addFormDataPart("file", filename, filePart)
             .build()

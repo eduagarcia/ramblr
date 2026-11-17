@@ -23,3 +23,7 @@ google-services.json
 .artifacts/
 .hermes/
 .DS_Store
+
+# Personal defaults baked into a private build (API keys): see PersonalDefaults.kt and
+# personal-defaults.example.json.
+/personal/
