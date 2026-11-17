@@ -47,8 +47,13 @@ To write it from a whisrs configuration:
 python3 scripts/personal-defaults-from-whisrs.py ~/.config/whisrs/config.toml \
     --style-title "T3 Code" \
     --pref single_tap_restore_and_record_enabled=true \
-    --pref ring_visibility_mode=KEYBOARD
+    --pref ring_visibility_mode=KEYBOARD \
+    --pref self_update_notify_enabled=false
 ```
+
+The last one matters for a fork build: the `github` flavor otherwise announces the original
+project's releases, which cannot install over a build signed with another key and do not have
+the fork's changes.
 
 It maps `[asr-sidecar]` to the transcription provider, `[llm]` and `llm_instruction` to the
 cleanup provider and style (with whisrs' own vocabulary sentence), `vocabulary`,
