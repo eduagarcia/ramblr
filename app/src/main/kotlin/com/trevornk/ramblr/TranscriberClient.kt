@@ -10,7 +10,37 @@ import java.io.File
 import java.io.IOException
 
 object TranscriberClient {
-    data class Result(val text: String?, val error: String?)
+    /**
+     * [text] is null exactly when the request failed. The rest describes that failure for
+     * [TranscriptionRetry] and the logs, and is null/false on success and for results built
+     * without a response: [httpStatus] and [retryAfterMs] come from the response, [errorBody] is
+     * the body of a non-2xx response (truncated), [noResponse] is a request that got none (network
+     * error, timeout), and [cancelled] is a call the app itself aborted. [model] and [attempts]
+     * are filled in by [transcribeWithRetries]: the model that produced this result and every
+     * request made for it, in order.
+     */
+    data class Result(
+        val text: String?,
+        val error: String?,
+        val httpStatus: Int? = null,
+        val retryAfterMs: Long? = null,
+        val errorBody: String? = null,
+        val noResponse: Boolean = false,
+        val cancelled: Boolean = false,
+        val model: String? = null,
+        val attempts: List<TranscriptionAttempt> = emptyList(),
+    )
+
+    /** Longest stretch of a failed response's body kept in a [Result] and in the failure log. */
+    const val MAX_ERROR_BODY_CHARS = 2000
+
+    /**
+     * Debug-build test seam (`DebugDeliverReceiver`'s DEBUG_TRANSCRIPTION_FAULTS): HTTP statuses
+     * the next [transcribe] calls answer with instead of sending anything, one per call, so the
+     * retry and fallback path can be driven on a device without a failing server. Null and unused
+     * in a release build.
+     */
+    @Volatile internal var debugFaults: java.util.concurrent.ConcurrentLinkedQueue<Int>? = null
 
     private val client = NetworkClients.shared
 
@@ -143,6 +173,79 @@ object TranscriberClient {
     }
 
     /**
+     * The [Result] for a response with [status] and [body]. A 2xx response is parsed as before. Any
+     * other status is a failure even when its body happens to parse: the status, the server's
+     * retry delay (header or OpenRouter's `metadata.retry_after_seconds`, whichever is longer)
+     * and the body are kept for [TranscriptionRetry] and the failure log.
+     */
+    fun responseResult(status: Int, retryAfterMs: Long?, body: String, terms: List<String>): Result {
+        if (status in 200..299) return resultFor(body, terms).copy(httpStatus = status)
+        val message = parseResponse(body).error?.takeIf { it.isNotBlank() } ?: "HTTP $status"
+        val asked = listOfNotNull(retryAfterMs, TranscriptionRetry.bodyRetryAfterMs(body)).maxOrNull()
+        return Result(
+            null, "HTTP $status: $message", httpStatus = status, retryAfterMs = asked,
+            errorBody = body.take(MAX_ERROR_BODY_CHARS),
+        )
+    }
+
+    private val retryScheduler by lazy {
+        java.util.concurrent.Executors.newSingleThreadScheduledExecutor { r ->
+            Thread(r, "TranscriptionRetry").apply { isDaemon = true }
+        }
+    }
+
+    /**
+     * [transcribe], ridden through a transient failure according to [policy] (see
+     * [TranscriptionRetry.run]): the same request again after a wait, up to [policy]'s retries,
+     * then one request for its fallback model, which gets no vocabulary and always WAV.
+     * [TranscriptionRetryPolicy.NONE] is one plain [transcribe] call.
+     *
+     * [shouldContinue] is asked before every request after the first: false (the dictation was
+     * cancelled or timed out meanwhile) ends the run with the last failure. [onFailedAttempt] sees
+     * each request that failed, as it fails. [callback] runs exactly once, on an OkHttp or the
+     * retry thread; its [Result.attempts] lists every request made.
+     */
+    fun transcribeWithRetries(
+        pcmFile: File,
+        apiKey: String,
+        cancelHolder: InFlightCall,
+        baseUrl: String = PostProcessor.DEFAULT_BASE_URL,
+        model: String = DEFAULT_MODEL,
+        vocabularyTerms: List<String> = emptyList(),
+        compressedFile: File? = null,
+        language: String? = null,
+        policy: TranscriptionRetryPolicy = TranscriptionRetryPolicy.NONE,
+        shouldContinue: () -> Boolean = { true },
+        onFailedAttempt: (TranscriptionAttempt) -> Unit = {},
+        // Test seam: how a retry's wait is spent. Production waits on the scheduler thread.
+        schedule: (delayMs: Long, block: () -> Unit) -> Unit = { delayMs, block ->
+            retryScheduler.schedule({ block() }, delayMs, java.util.concurrent.TimeUnit.MILLISECONDS)
+        },
+        callback: (Result) -> Unit,
+    ) {
+        val mainModel = model.ifBlank { DEFAULT_MODEL }
+        TranscriptionRetry.run(
+            model = mainModel,
+            policy = policy,
+            send = { attemptModel, isFallback, done ->
+                transcribe(
+                    pcmFile, apiKey, cancelHolder,
+                    baseUrl = baseUrl,
+                    model = attemptModel,
+                    vocabularyTerms = if (isFallback) emptyList() else vocabularyTerms,
+                    compressedFile = if (isFallback) null else compressedFile,
+                    language = language,
+                    callback = done,
+                )
+            },
+            schedule = schedule,
+            shouldContinue = shouldContinue,
+            onFailedAttempt = onFailedAttempt,
+            callback = callback,
+        )
+    }
+
+    /**
      * The `language` form part for [language] (#290): the ISO-639-1 field OpenAI, Groq, Open
      * WebUI and Whisper-based servers all accept to skip auto-detection. Without it, detection
      * can settle on English for non-English speech, and the model returns English or
@@ -175,6 +278,15 @@ object TranscriberClient {
         language: String? = null,
         callback: (Result) -> Unit,
     ) {
+        debugFaults?.poll()?.let { status ->
+            callback(
+                Result(
+                    null, "Provider returned $status", httpStatus = status, retryAfterMs = 1000L,
+                    errorBody = """{"error":{"message":"Provider returned $status","code":$status,"metadata":{"injected":true}}}""",
+                )
+            )
+            return
+        }
         val bodyBuilder = MultipartBody.Builder()
             .setType(MultipartBody.FORM)
             .addFormDataPart("model", model.ifBlank { DEFAULT_MODEL })
@@ -212,16 +324,22 @@ object TranscriberClient {
         call.enqueue(object : Callback {
             override fun onFailure(call: Call, e: IOException) {
                 cancelHolder.clear(call)
-                callback(Result(null, e.message))
+                val cancelled = call.isCanceled()
+                callback(Result(null, e.message ?: e.javaClass.simpleName, noResponse = !cancelled, cancelled = cancelled))
             }
             override fun onResponse(call: Call, response: Response) {
                 cancelHolder.clear(call)
                 // Read via HttpBodyReader (#62): a body read that throws inside onResponse is
                 // swallowed by OkHttp, so the callback (and the temp PCM file's deletion in it)
                 // would otherwise never run and the dictation would hang until the watchdog.
+                val status = response.code
+                val retryAfterMs = TranscriptionRetry.retryAfterMs(
+                    response.header("retry-after-ms"), response.header("Retry-After"), System.currentTimeMillis(),
+                )
                 HttpBodyReader.read(response).fold(
-                    onSuccess = { body -> callback(resultFor(body, vocabularyTerms)) },
-                    onFailure = { e -> callback(Result(null, e.message)) },
+                    onSuccess = { body -> callback(responseResult(status, retryAfterMs, body, vocabularyTerms)) },
+                    // The body died mid-read: no usable answer, the same as no answer.
+                    onFailure = { e -> callback(Result(null, e.message, httpStatus = status, noResponse = true)) },
                 )
             }
         })

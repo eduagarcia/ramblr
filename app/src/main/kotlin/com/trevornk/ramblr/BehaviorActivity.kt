@@ -36,6 +36,8 @@ class BehaviorActivity : BaseSettingsActivity() {
     private lateinit var longPressCancelUndoSwitch: MaterialSwitch
     private lateinit var silenceAutoStopSwitch: MaterialSwitch
     private lateinit var dictationQueueSwitch: MaterialSwitch
+    private lateinit var transcriptionRetriesRow: View
+    private lateinit var transcriptionFallbackRow: View
     private lateinit var silenceAutoStopRow: LinearLayout
     private lateinit var silenceAutoStopThresholdRow: LinearLayout
     /** Latest WorkManager state for the on-demand Silero VAD model download (#108), used to avoid
@@ -261,6 +263,20 @@ class BehaviorActivity : BaseSettingsActivity() {
         ) { promptSilenceAutoStopThreshold() }
         place(Section.DICTATION, 11, silenceAutoStopThresholdRow)
 
+        transcriptionRetriesRow = settingsRow(
+            "Transcription retries",
+            transcriptionRetriesSummary(),
+            details = "0 by default. Cloud transcription through an OpenAI-compatible provider only. Never repeated: a refused key, a bad request, no credit",
+        ) { promptTranscriptionRetries() }
+        place(Section.DICTATION, 30, transcriptionRetriesRow)
+
+        transcriptionFallbackRow = settingsRow(
+            "Fallback transcription model",
+            transcriptionFallbackSummary(),
+            details = "None by default. Asked once, at the same provider and with the same key, without the vocabulary",
+        ) { promptTranscriptionFallbackModel() }
+        place(Section.DICTATION, 31, transcriptionFallbackRow)
+
         dictationQueueSwitch = MaterialSwitch(this).apply {
             isChecked = DictationQueueToggle.isEnabled(this@BehaviorActivity)
             isClickable = false
@@ -412,6 +428,8 @@ class BehaviorActivity : BaseSettingsActivity() {
         longPressCancelUndoSwitch.isChecked = LongPressCancelUndoToggle.isEnabled(this)
         silenceAutoStopSwitch.isChecked = SilenceAutoStopToggle.isEnabled(this)
         dictationQueueSwitch.isChecked = DictationQueueToggle.isEnabled(this)
+        transcriptionRetriesRow.findViewWithTag<TextView>("subtitle").text = transcriptionRetriesSummary()
+        transcriptionFallbackRow.findViewWithTag<TextView>("subtitle").text = transcriptionFallbackSummary()
         silenceAutoStopThresholdRow.findViewWithTag<TextView>("subtitle").text = silenceAutoStopThresholdSummary()
         refreshSilenceAutoStopSummary()
         vocabularyRowSub.text = VocabularyEditor.rowSummary(this)
@@ -620,6 +638,57 @@ class BehaviorActivity : BaseSettingsActivity() {
     private fun autoPeekDelaySummary(): String {
         val seconds = AutoPeekDelay.secondsOrDefault(this)
         return "$seconds second${if (seconds == 1) "" else "s"} of inactivity before it slides to the edge"
+    }
+
+    private fun transcriptionRetriesSummary(): String =
+        when (val retries = TranscriptionRetrySettings.retries(prefs())) {
+            0 -> "Off: a rate-limited or unanswered request fails the dictation"
+            1 -> "A rate-limited or unanswered request is sent again once, after 1 s"
+            else -> "A rate-limited or unanswered request is sent again up to $retries times, waiting 1 s, then 2 s…"
+        }
+
+    private fun transcriptionFallbackSummary(): String =
+        TranscriptionRetrySettings.fallbackModel(prefs()).ifEmpty { null }
+            ?.let { "$it is asked once when the retries run out" }
+            ?: "None: when the retries run out, the dictation fails"
+
+    private fun promptTranscriptionRetries() {
+        val input = EditText(this).apply {
+            inputType = InputType.TYPE_CLASS_NUMBER
+            setText(TranscriptionRetrySettings.retries(prefs()).toString())
+            setSelection(text.length)
+        }
+        android.app.AlertDialog.Builder(this)
+            .setTitle("Transcription retries")
+            .setMessage("How many times a cloud transcription request is sent again after a rate limit (HTTP 429), an overloaded or unreachable server, or no answer (0-${TranscriptionRetrySettings.MAX_RETRIES}). The wait is 1 s, doubled each time, 5 s at most.")
+            .setView(input.apply { setPadding(dp(24), dp(8), dp(24), dp(8)) })
+            .setPositiveButton("Save") { _, _ ->
+                val retries = input.text.toString().toIntOrNull()
+                if (retries != null) {
+                    TranscriptionRetrySettings.set(prefs(), retries, TranscriptionRetrySettings.fallbackModel(prefs()))
+                }
+                refresh()
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    private fun promptTranscriptionFallbackModel() {
+        val input = EditText(this).apply {
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
+            setText(TranscriptionRetrySettings.fallbackModel(prefs()))
+            setSelection(text.length)
+        }
+        android.app.AlertDialog.Builder(this)
+            .setTitle("Fallback transcription model")
+            .setMessage("A model id of the same provider (for example elevenlabs/scribe-v2 on OpenRouter), asked once when the retries run out. Empty for none.")
+            .setView(input.apply { setPadding(dp(24), dp(8), dp(24), dp(8)) })
+            .setPositiveButton("Save") { _, _ ->
+                TranscriptionRetrySettings.set(prefs(), TranscriptionRetrySettings.retries(prefs()), input.text.toString())
+                refresh()
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
     }
 
     private fun promptAutoPeekDelay() {

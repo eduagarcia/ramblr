@@ -1782,15 +1782,24 @@ class DictationRuntime internal constructor(
                     // (the #193 locals-capture pattern) -- remainingCompressedFile can be nulled
                     // by a LOCAL candidate, and this callback must report/delete what IT sent.
                     val uploadCompressedFile = remainingCompressedFile
-                    TranscriberClient.transcribe(
+                    val requestedModel = entry.transcriptionModel?.ifBlank { null } ?: TranscriberClient.DEFAULT_MODEL
+                    // Retries and the fallback model are off unless configured (see
+                    // [TranscriptionRetrySettings]); then this is one plain request, as before.
+                    TranscriberClient.transcribeWithRetries(
                         file, apiKey, inFlightCall,
                         baseUrl = entry.baseUrlOverride ?: PostProcessor.DEFAULT_BASE_URL,
-                        model = entry.transcriptionModel?.ifBlank { null } ?: TranscriberClient.DEFAULT_MODEL,
+                        model = requestedModel,
                         vocabularyTerms = vocabularyTerms(),
                         compressedFile = uploadCompressedFile,
                         // #290: skip auto-detection when the user set their dictation language.
                         language = DictationLanguage.languageOrNull(context),
+                        policy = TranscriptionRetrySettings.policy(context),
+                        // A cancel or the watchdog ends the dictation: no retry for it after that.
+                        shouldContinue = { guard.isCurrent(token) },
+                        onFailedAttempt = { TranscriptionFailureLog.log(context, correlationIdFor(token), it) },
                     ) { result ->
+                        // The model that answered: the fallback one when the retries ran out.
+                        val servedModel = result.model ?: requestedModel
                         val roundTripMs = System.currentTimeMillis() - transcribeStartMs
                         Log.i(TAG, "OpenAI transcription HTTP round-trip took ${roundTripMs}ms")
                         val success = result.text != null && result.text.isNotBlank()
@@ -1799,14 +1808,16 @@ class DictationRuntime internal constructor(
                             correlationId = correlationIdFor(token),
                             transcription = BenchmarkStage(
                                 provider = entry.kind.name,
-                                model = entry.transcriptionModel?.ifBlank { null } ?: TranscriberClient.DEFAULT_MODEL,
+                                model = servedModel,
                                 latencyMs = roundTripMs,
                                 success = success,
-                                compressedUpload = uploadCompressedFile != null,
+                                compressedUpload = uploadCompressedFile != null &&
+                                    result.attempts.lastOrNull()?.kind != TranscriptionAttempt.Kind.FALLBACK,
                                 // #138: a provider error envelope yields blank text, so this
                                 // records success=false; without the reason a bad key, a rate
                                 // limit and a timeout are indistinguishable after logcat rotates.
                                 error = sanitizeError(result.error),
+                                attempts = result.attempts,
                             ),
                             rawTextLength = result.text?.length,
                         )
@@ -1815,7 +1826,7 @@ class DictationRuntime internal constructor(
                             correlationId = correlationIdFor(token),
                             transcription = QualityStage(
                                 provider = entry.kind.name,
-                                model = entry.transcriptionModel?.ifBlank { null } ?: TranscriberClient.DEFAULT_MODEL,
+                                model = servedModel,
                             ),
                             rawText = result.text,
                         )

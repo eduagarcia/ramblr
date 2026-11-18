@@ -181,34 +181,40 @@ internal class DictationQueue(
         }
         val model = entry.transcriptionModel?.ifBlank { null } ?: TranscriberClient.DEFAULT_MODEL
         val startedAtMs = System.currentTimeMillis()
-        TranscriberClient.transcribe(
+        TranscriberClient.transcribeWithRetries(
             job.pcm, apiKey, job.call,
             baseUrl = entry.baseUrlOverride ?: PostProcessor.DEFAULT_BASE_URL,
             model = model,
             vocabularyTerms = vocabularyTerms(),
             language = DictationLanguage.languageOrNull(context),
+            policy = TranscriptionRetrySettings.policy(context),
+            // The job's timeout and shutdown both cancel its call: no retry after that.
+            shouldContinue = { !job.call.isCancelled },
+            onFailedAttempt = { TranscriptionFailureLog.log(context, job.correlationId, it) },
         ) { result ->
+            val servedModel = result.model ?: model
             val roundTripMs = System.currentTimeMillis() - startedAtMs
             val text = result.text
             val success = !text.isNullOrBlank()
-            Log.i(TAG, "Queued transcription ${job.correlationId} took ${roundTripMs}ms success=$success")
+            Log.i(TAG, "Queued transcription ${job.correlationId} took ${roundTripMs}ms success=$success model=$servedModel requests=${result.attempts.size}")
             BenchmarkLogger.log(
                 context = context,
                 correlationId = job.correlationId,
                 transcription = BenchmarkStage(
                     provider = entry.kind.name,
-                    model = model,
+                    model = servedModel,
                     latencyMs = roundTripMs,
                     success = success,
                     compressedUpload = false,
                     error = sanitizeError(result.error),
+                    attempts = result.attempts,
                 ),
                 rawTextLength = text?.length,
             )
             if (listener.allowsTranscriptRetention()) QualityLogger.log(
                 context = context,
                 correlationId = job.correlationId,
-                transcription = QualityStage(provider = entry.kind.name, model = model),
+                transcription = QualityStage(provider = entry.kind.name, model = servedModel),
                 rawText = text,
             )
             when {

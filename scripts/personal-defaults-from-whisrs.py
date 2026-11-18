@@ -71,6 +71,14 @@ def build(config: dict, style_title: str = "whisrs", prefs: dict | None = None) 
         entry = {"baseUrl": url, "model": sidecar.get("model", ""), "apiKey": sidecar["api_key"]}
         if (urlparse(url).hostname or "").lower() == "openrouter.ai":
             entry["preset"] = "openrouter"
+        # whisrs `transcription_retries` / `transcription_fallback_model`: a rate-limited or
+        # unanswered request is sent again, then a second model is asked once.
+        retries = general.get("transcription_retries", 0)
+        if isinstance(retries, int) and retries > 0:
+            entry["retries"] = retries
+        fallback = str(general.get("transcription_fallback_model", "")).strip()
+        if fallback:
+            entry["fallbackModel"] = fallback
         out["transcription"] = entry
 
     llm = config.get("llm", {})
@@ -131,6 +139,8 @@ def main() -> int:
     summary = {
         "version": defaults["version"],
         "transcription": defaults.get("transcription", {}).get("model"),
+        "retries": defaults.get("transcription", {}).get("retries", 0),
+        "fallback": defaults.get("transcription", {}).get("fallbackModel"),
         "cleanup": defaults.get("cleanup", {}).get("model"),
         "language": defaults.get("language"),
         "vocabulary": len(defaults.get("vocabulary", [])),

@@ -64,6 +64,9 @@ object PersonalDefaults {
             personal += entry
             ProviderCredentialStore.set(context, entry.id, t.optString("apiKey"))
             edit.putBoolean("use_local", false)
+            if (t.has("retries") || t.has("fallbackModel")) {
+                TranscriptionRetrySettings.set(prefs, t.optInt("retries", 0), t.optString("fallbackModel"))
+            }
         }
         json.optJSONObject("cleanup")?.let { c ->
             val entry = cleanupEntry(c)

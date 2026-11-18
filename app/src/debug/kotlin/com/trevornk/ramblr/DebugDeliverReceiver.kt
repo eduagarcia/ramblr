@@ -57,6 +57,13 @@ import android.view.accessibility.AccessibilityNodeInfo
  *
  *     adb shell am broadcast -n com.trevornk.ramblr/.DebugDeliverReceiver \
  *         -a com.trevornk.ramblr.DEBUG_NEXT_AUDIO --es file clip.wav
+ *
+ * Make the next transcription requests fail without being sent, one HTTP status per request, to
+ * drive the retry and fallback path (`TranscriptionRetry`) with no failing server: "429,429"
+ * fails the first two requests and lets the third reach the provider. An empty list clears it.
+ *
+ *     adb shell am broadcast -n com.trevornk.ramblr/.DebugDeliverReceiver \
+ *         -a com.trevornk.ramblr.DEBUG_TRANSCRIPTION_FAULTS --es statuses 429,429
  */
 class DebugDeliverReceiver : BroadcastReceiver() {
     private companion object {
@@ -136,6 +143,13 @@ class DebugDeliverReceiver : BroadcastReceiver() {
                 } catch (e: Exception) {
                     Log.w("PhoneWhisper", "DEBUG_NEXT_AUDIO could not read ${wav.name}", e)
                 }
+            }
+            "com.trevornk.ramblr.DEBUG_TRANSCRIPTION_FAULTS" -> {
+                val statuses = intent.getStringExtra("statuses").orEmpty()
+                    .split(',').mapNotNull { it.trim().toIntOrNull() }
+                TranscriberClient.debugFaults =
+                    if (statuses.isEmpty()) null else java.util.concurrent.ConcurrentLinkedQueue(statuses)
+                Log.i("PhoneWhisper", "DEBUG_TRANSCRIPTION_FAULTS armed $statuses")
             }
             "com.trevornk.ramblr.DEBUG_PLAY_STOP" -> {
                 player?.release()

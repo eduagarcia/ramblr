@@ -35,6 +35,9 @@ data class BenchmarkStage(
      * content, and this log is deliberately length-only (see [BenchmarkLogger]'s privacy note).
      */
     val error: String? = null,
+    /** Every request of a transcription that needed more than one (a retry or the fallback
+     *  model, see [TranscriptionRetry]); null, and absent from the line, otherwise. */
+    val attempts: List<TranscriptionAttempt>? = null,
 )
 
 /**
@@ -295,6 +298,8 @@ object BenchmarkLogger {
         // Additive (#138), same null-vs-missing convention as the keys above so the 910 existing
         // records stay parseable by any consumer that doesn't know this key.
         .put("error", error ?: JSONObject.NULL)
+        // Additive: only on a transcription that took more than one request.
+        .apply { attempts?.takeIf { it.size > 1 }?.let { put("attempts", TranscriptionRetry.attemptsJson(it)) } }
 
     private fun PipelineStage.toJson(): JSONObject = JSONObject()
         .put("stopToDrainMs", stopToDrainMs ?: JSONObject.NULL)

@@ -128,6 +128,11 @@ class DataLogsActivity : BaseSettingsActivity() {
             "Send speed measurements to any app. Only timings and model ids, no dictated text"
         ) { shareBenchmarkLog() })
 
+        diagnostics.addView(settingsRow(
+            "Share transcription failures log",
+            "Each cloud transcription request that failed: model, HTTP status and the provider's answer. No audio, no dictated text"
+        ) { shareTranscriptionFailureLog() })
+
         qualityLogEnabledSwitch = com.google.android.material.materialswitch.MaterialSwitch(this).apply {
             isChecked = QualityLogger.isEnabled(this@DataLogsActivity)
             isClickable = false
@@ -447,6 +452,22 @@ class DataLogsActivity : BaseSettingsActivity() {
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
         }
         startActivity(Intent.createChooser(intent, "Share benchmark log"))
+    }
+
+    /** Shares files/transcription_failures.jsonl (see [TranscriptionFailureLog]), the same way. */
+    private fun shareTranscriptionFailureLog() {
+        val file = TranscriptionFailureLog.logFile(this)
+        if (!file.exists() || file.length() == 0L) {
+            toast("No transcription request has failed so far")
+            return
+        }
+        val uri = FileProvider.getUriForFile(this, "$packageName.fileprovider", file)
+        val intent = Intent(Intent.ACTION_SEND).apply {
+            type = "application/jsonl"
+            putExtra(Intent.EXTRA_STREAM, uri)
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+        startActivity(Intent.createChooser(intent, "Share transcription failures log"))
     }
 
     /** Shares files/quality_log.jsonl (#102) via the same FileProvider pattern as

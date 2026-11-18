@@ -21,12 +21,36 @@ with untouched settings behaves like the original.
 | **Vocabulary list placeholder.** A custom cleanup prompt can word its own vocabulary instruction and put `{{vocabulary_list}}` where the bare, comma-separated terms go. `{{vocabulary}}` still inserts the built-in sentence. | `PostProcessor.interpolateVocabulary` | in the prompt text |
 | **Snippets before cleanup.** Snippets used as fixed replacements ("Open Sense" → "OPNSense") can also be applied to the transcript before cleanup, so the LLM reads the right word. The pass on the final text still runs. | `SnippetsBeforeCleanupToggle` | Settings → Words and snippets → Snippets → "Also apply before AI cleanup" |
 | **Dictation queue.** The next dictation can start while the previous one is still transcribed and cleaned. The texts are inserted in the order the dictations ended, each where the cursor is at that moment. The ring keeps its spinner while something is pending. | `DictationQueue`, `DictationQueueToggle` | Settings → Recording → "Queue dictations" |
+| **Transcription retries and a fallback model.** A request that is rate limited (HTTP 429), hits an overloaded or unreachable server (502, 503, 504, 520 to 524) or gets no answer is sent again, waiting 1 s, then 2 s (or the server's `Retry-After` when longer, 5 s at most). When the retries run out, a second model is asked once at the same provider with the same key, without the vocabulary. A bad request, a refused key and any credit or billing error are never repeated and never go to the fallback. | `TranscriptionRetry`, `TranscriberClient.transcribeWithRetries` | Settings → Recording → "Transcription retries" and "Fallback transcription model" (0 and none by default) |
 | **Personal defaults.** One optional asset pre-configures a private build: providers and keys, language, vocabulary, replacements, cleanup prompt, any other preference. | `PersonalDefaults`, `RamblrApp` | `personal/assets/personal_defaults.json` |
 
 The queue covers the floating icon with OpenAI-compatible cloud transcription. A dictation that
 would be transcribed on the device or by Gemini, translated, previewed live or previewed before
 inserting takes the original one-at-a-time path. A queued dictation cannot be cancelled with a
 long press, and it is inserted where the cursor is when it is ready, not where it was started.
+
+### Why the retries exist, and what gets logged
+
+Microsoft MAI-Transcribe 2 has one provider on OpenRouter (Azure), and its rate limit is not the
+caller's doing: on 2026-11-17, 4 of 30 isolated requests sent 6 s apart got
+`429 {"error":{"message":"Provider returned 429","code":429,"metadata":{"retry_after_seconds":1}}}`
+with `Retry-After: 1`. Sending again after 1 s failed all 4 times; again 2 s later worked in 3. A
+second model on the same endpoint (`elevenlabs/scribe-v2`) answered at once. So: two retries,
+then one request to the other model. That model takes no Azure phrase list, which is why the
+fallback request carries no vocabulary; the cleanup step still has it.
+
+Retries apply to dictation (both the one-at-a-time path and the queue) through an
+OpenAI-compatible provider. Gemini, on-device transcription and the audio-file feature are
+unchanged. With several transcription providers configured, the walk to the next provider happens
+after the retries and the fallback, as before.
+
+- `files/benchmark_log.jsonl`: the transcription stage of a dictation that took more than one
+  request has an `attempts` array (kind `FIRST`/`RETRY`/`FALLBACK`, model, HTTP status, latency,
+  wait), and its `model` is the one that answered.
+- `files/transcription_failures.jsonl`: one line per failed request with the model, the HTTP
+  status and the response body (first 2000 characters). No audio, no transcript. Settings →
+  Data & logs → "Share transcription failures log" sends it to another app.
+- logcat, tag `PhoneWhisper`: `Transcription request failed: ...` per failed request.
 
 ## Personal defaults
 
@@ -55,8 +79,9 @@ The last one matters for a fork build: the `github` flavor otherwise announces t
 project's releases, which cannot install over a build signed with another key and do not have
 the fork's changes.
 
-It maps `[asr-sidecar]` to the transcription provider, `[llm]` and `llm_instruction` to the
-cleanup provider and style (with whisrs' own vocabulary sentence), `vocabulary`,
+It maps `[asr-sidecar]` to the transcription provider, `transcription_retries` and
+`transcription_fallback_model` to its retries and fallback model, `[llm]` and `llm_instruction`
+to the cleanup provider and style (with whisrs' own vocabulary sentence), `vocabulary`,
 `[replacements]`, `language`, and `[input] queue` to the dictation queue. `--pref KEY=VALUE` sets
 any other preference of the app by its key.
 
@@ -104,6 +129,9 @@ The debug build's `DebugDeliverReceiver` (shell-only, see its header) has two ac
   recording on the ring afterwards; everything after the microphone is the real path.
 - `DEBUG_PLAY --es file clip.wav`: plays the clip through the phone's speaker, for a test that
   includes the microphone.
+- `DEBUG_TRANSCRIPTION_FAULTS --es statuses 429,429`: the next transcription requests fail with
+  those HTTP statuses without being sent, one per request. `429,429` exercises two retries and
+  then the real provider; `429,429,429` (with two retries configured) the real fallback model.
 
 ```sh
 adb push clip.wav /data/local/tmp/ && adb shell run-as $P cp /data/local/tmp/clip.wav files/
@@ -121,7 +149,7 @@ git checkout eduagarcia && git merge main
 ```
 
 The fork keeps its code in new files where it can (`DictationQueue.kt`, `PersonalDefaults.kt`,
-`CleanupTimeout.kt`, `SnippetsBeforeCleanupToggle.kt`, `RamblrApp.kt`) and touches the original
+`CleanupTimeout.kt`, `SnippetsBeforeCleanupToggle.kt`, `TranscriptionRetry.kt`, `RamblrApp.kt`) and touches the original
 ones in few places: `TranscriberClient`, `PostProcessor`, `ProviderChain*`, `CleanupWaterfall*`,
 `DictationRuntime` (queue hand-off in `transcribeApi`, `dictationStylePrompt`), the accessibility
 service's runtime listener, and two settings screens.
