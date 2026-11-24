@@ -100,6 +100,10 @@ object PersonalDefaults {
             edit.putBoolean(SnippetsBeforeCleanupToggle.KEY, json.optBoolean("replacementsBeforeCleanup", true))
         }
 
+        json.optJSONArray("pauseNearApps")?.let { array ->
+            PauseNearAppsStore.setPackages(prefs, (0 until array.length()).map { array.optString(it) }.toSet())
+        }
+
         json.optJSONObject("cleanupStyle")?.let { style ->
             val prompt = style.optString("prompt")
             if (prompt.isNotBlank()) {

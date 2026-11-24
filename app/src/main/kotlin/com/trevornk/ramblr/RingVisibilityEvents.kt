@@ -42,16 +42,25 @@ object RingEventTypes {
 class RingEventSubscription(
     private val getInfo: () -> AccessibilityServiceInfo?,
     private val setInfo: (AccessibilityServiceInfo) -> Unit,
+    /** Event types another feature needs whatever the mode (see [PauseNearApps.eventTypes]). */
+    private val extraEventTypes: () -> Int = { 0 },
 ) {
     private var baseEventTypes: Int? = null
+    private var baseNotificationTimeout: Long? = null
 
     /** Subscribes (or unsubscribes) for [mode]. Returns true if the subscription was changed. */
     fun apply(mode: RingVisibilityMode): Boolean {
         val info = getInfo() ?: return false
         val base = baseEventTypes ?: info.eventTypes.also { baseEventTypes = it }
-        val wanted = RingEventTypes.forMode(base, mode)
-        if (info.eventTypes == wanted) return false
+        val baseTimeout = baseNotificationTimeout ?: info.notificationTimeout.also { baseNotificationTimeout = it }
+        val extra = extraEventTypes()
+        val wanted = RingEventTypes.forMode(base, mode) or extra
+        // The extra events are for reacting to an app the moment it comes to the front, so they
+        // are delivered at once instead of after the static config's batching delay.
+        val wantedTimeout = if (extra != 0) 0L else baseTimeout
+        if (info.eventTypes == wanted && info.notificationTimeout == wantedTimeout) return false
         info.eventTypes = wanted
+        info.notificationTimeout = wantedTimeout
         setInfo(info)
         return true
     }

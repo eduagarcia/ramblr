@@ -32,6 +32,7 @@
     "Open Sense": "OPNSense"
   },
   "replacementsBeforeCleanup": true,
+  "pauseNearApps": ["com.example.bank"],
   "prefs": {
     "single_tap_restore_and_record_enabled": true
   }

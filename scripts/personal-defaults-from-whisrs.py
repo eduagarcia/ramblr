@@ -12,6 +12,8 @@ the desktop stay configured from one file.
 --style-title names the cleanup style the app shows for the desktop instruction (default "whisrs").
 --pref KEY=VALUE (repeatable) sets any other app preference by its key, e.g.
 --pref single_tap_restore_and_record_enabled=true --pref ring_visibility_mode=KEYBOARD.
+--pause-near-app PACKAGE (repeatable) lists an app the accessibility service turns itself off
+for while it is in front, e.g. a banking app that objects to it.
 
 The output holds API keys and is gitignored. Its `version` is a hash of its content: the app
 applies an asset once per version, so rebuilding without a config change keeps what was changed
@@ -61,7 +63,12 @@ def parse_pref(text: str):
         return key.strip(), value
 
 
-def build(config: dict, style_title: str = "whisrs", prefs: dict | None = None) -> dict:
+def build(
+    config: dict,
+    style_title: str = "whisrs",
+    prefs: dict | None = None,
+    pause_near_apps: list[str] | None = None,
+) -> dict:
     general = config.get("general", {})
     out: dict = {"skipOnboarding": True}
 
@@ -121,6 +128,10 @@ def build(config: dict, style_title: str = "whisrs", prefs: dict | None = None) 
     if all_prefs:
         out["prefs"] = all_prefs
 
+    pause = sorted({p.strip() for p in pause_near_apps or [] if p.strip()})
+    if pause:
+        out["pauseNearApps"] = pause
+
     digest = hashlib.sha256(json.dumps(out, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
     return {"version": digest[:12], **out}
 
@@ -130,9 +141,10 @@ def main() -> int:
     parser.add_argument("config", nargs="?", default="~/.config/whisrs/config.toml")
     parser.add_argument("--style-title", default="whisrs")
     parser.add_argument("--pref", action="append", type=parse_pref, default=[], metavar="KEY=VALUE")
+    parser.add_argument("--pause-near-app", action="append", default=[], metavar="PACKAGE")
     args = parser.parse_args()
     with Path(args.config).expanduser().open("rb") as handle:
-        defaults = build(tomllib.load(handle), args.style_title, dict(args.pref))
+        defaults = build(tomllib.load(handle), args.style_title, dict(args.pref), args.pause_near_app)
     OUTPUT.parent.mkdir(parents=True, exist_ok=True)
     OUTPUT.write_text(json.dumps(defaults, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     OUTPUT.chmod(0o600)
@@ -145,6 +157,7 @@ def main() -> int:
         "language": defaults.get("language"),
         "vocabulary": len(defaults.get("vocabulary", [])),
         "replacements": len(defaults.get("replacements", {})),
+        "pauseNearApps": len(defaults.get("pauseNearApps", [])),
     }
     print(f"wrote {OUTPUT}: {summary}")
     return 0

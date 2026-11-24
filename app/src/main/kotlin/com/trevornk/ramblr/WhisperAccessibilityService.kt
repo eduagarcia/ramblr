@@ -816,6 +816,7 @@ open class WhisperAccessibilityService : AccessibilityService() {
     internal val ringEventSubscription = RingEventSubscription(
         getInfo = { serviceInfo },
         setInfo = { serviceInfo = it },
+        extraEventTypes = { PauseNearApps.eventTypes(this) },
     )
     /** Strong reference: SharedPreferences holds listeners weakly. */
     private var ringModePrefsListener: android.content.SharedPreferences.OnSharedPreferenceChangeListener? = null
@@ -991,6 +992,8 @@ open class WhisperAccessibilityService : AccessibilityService() {
         // Runs after showOverlay() so the overlay really is connected by the time we claim it is.
         IconVisibilityNotifications.repostIfMissing(this, overlayConnected = overlayView != null)
         registerAccessibilityButton()
+        // Connected means not paused; and if a listed app is already in front, pause again now.
+        PauseNearApps.onServiceConnected(this, currentForegroundPackageName())
         registerNetworkCallback()
         registerDisplayListener()
         registerScreenStateReceiver()
@@ -1165,6 +1168,8 @@ open class WhisperAccessibilityService : AccessibilityService() {
      */
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         val type = event?.eventType ?: return
+        // A listed app came to the front: the service turns itself off (see PauseNearApps).
+        if (PauseNearApps.onAccessibilityEvent(this, type, event.packageName?.toString()) { currentForegroundPackageName() }) return
         val mode = RingVisibilityMode.read(this)
         if (!RingEventTypes.isRelevant(mode, type)) return
         val present = isKeyboardShowing() || (mode == RingVisibilityMode.TEXT_FIELD && isTextFieldFocused())
@@ -1192,6 +1197,7 @@ open class WhisperAccessibilityService : AccessibilityService() {
         ringModePrefsListener?.let { prefs.unregisterOnSharedPreferenceChangeListener(it) }
         val listener = android.content.SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
             if (key == RingVisibilityMode.KEY) onRingVisibilityModeChanged()
+            if (key == PauseNearAppsStore.KEY_PACKAGES) ringEventSubscription.apply(RingVisibilityMode.read(this))
             // The keyboard (or Settings) changed the shared "Translate to" choice: keep the badge true.
             if (key == KeyboardTranslation.KEY_TARGET || key == KeyboardTranslation.KEY_LANGUAGES) refreshTranslationBadge()
         }

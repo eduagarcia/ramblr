@@ -28,6 +28,7 @@ class BehaviorActivity : BaseSettingsActivity() {
     private lateinit var hideIconSwitch: MaterialSwitch
     private lateinit var automationOffHookSwitch: MaterialSwitch
     private lateinit var exclusionListRowSub: TextView
+    private lateinit var pauseNearAppsRowSub: TextView
     private lateinit var autoPeekSwitch: MaterialSwitch
     private lateinit var ringVisibilityRowSub: TextView
     private lateinit var autoPeekDelayRow: LinearLayout
@@ -161,6 +162,18 @@ class BehaviorActivity : BaseSettingsActivity() {
         }
         exclusionListRowSub = exclusionListRow.findViewWithTag("subtitle")
         place(Section.PRIVACY, 10, exclusionListRow)
+
+        val pauseNearAppsRow = settingsRow(
+            "Pause near apps",
+            pauseNearAppsSummary(),
+            indent = 0,
+            details = "Turns Ramblr's accessibility service off while a listed app is in front and back on " +
+                "when you leave it. For banking apps that object to it",
+        ) {
+            startActivity(android.content.Intent(this, PauseNearAppsActivity::class.java))
+        }
+        pauseNearAppsRowSub = pauseNearAppsRow.findViewWithTag("subtitle")
+        place(Section.PRIVACY, 12, pauseNearAppsRow)
 
         // #254 off switch, moved here from Ways to start dictation so every "keep Ramblr out"
         // control sits on one screen. In system-controls mode this is the ONLY off switch that
@@ -422,6 +435,7 @@ class BehaviorActivity : BaseSettingsActivity() {
         hideIconSwitch.isChecked = HideIconToggle.isEnabled(this)
         automationOffHookSwitch.isChecked = AutomationOffHookToggle.isEnabled(this)
         exclusionListRowSub.text = exclusionListSummary()
+        pauseNearAppsRowSub.text = pauseNearAppsSummary()
         ringVisibilityRowSub.text = ringVisibilitySummary()
         autoPeekSwitch.isChecked = AutoPeekToggle.isEnabled(this)
         singleTapRestoreSwitch.isChecked = SingleTapRestoreToggle.isEnabled(this)
@@ -626,6 +640,15 @@ class BehaviorActivity : BaseSettingsActivity() {
      *  behavior without detaching the accessibility service or affecting bank fraud detection --
      *  the exact caveat the issue's body requires, worded so it's visible without opening the
      *  picker screen at all. */
+    private fun pauseNearAppsSummary(): String {
+        val count = PauseNearAppsStore.packages(this).size
+        return when {
+            count == 0 -> "No apps listed"
+            !InvocationSecureSettings.canWrite(this) -> "$count app${if (count == 1) "" else "s"} listed, not active yet: open to see what is missing"
+            else -> "$count app${if (count == 1) "" else "s"} listed. Ramblr is fully off while one of them is in front"
+        }
+    }
+
     private fun exclusionListSummary(): String {
         val count = PerAppExclusionStore.exclusions(this).size
         val countText = if (count == 0) "No apps excluded" else "$count app${if (count == 1) "" else "s"} excluded"

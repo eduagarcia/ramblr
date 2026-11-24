@@ -64,6 +64,12 @@ import android.view.accessibility.AccessibilityNodeInfo
  *
  *     adb shell am broadcast -n com.trevornk.ramblr/.DebugDeliverReceiver \
  *         -a com.trevornk.ramblr.DEBUG_TRANSCRIPTION_FAULTS --es statuses 429,429
+ *
+ * Replace the "pause near apps" list (`PauseNearAppsStore`), to test the pause with a harmless app
+ * instead of a bank; `--ez log true` only logs the list as it is:
+ *
+ *     adb shell am broadcast -n com.trevornk.ramblr/.DebugDeliverReceiver \
+ *         -a com.trevornk.ramblr.DEBUG_PAUSE_NEAR_APPS --es packages com.example.calculator
  */
 class DebugDeliverReceiver : BroadcastReceiver() {
     private companion object {
@@ -150,6 +156,13 @@ class DebugDeliverReceiver : BroadcastReceiver() {
                 TranscriberClient.debugFaults =
                     if (statuses.isEmpty()) null else java.util.concurrent.ConcurrentLinkedQueue(statuses)
                 Log.i("PhoneWhisper", "DEBUG_TRANSCRIPTION_FAULTS armed $statuses")
+            }
+            "com.trevornk.ramblr.DEBUG_PAUSE_NEAR_APPS" -> {
+                if (!intent.getBooleanExtra("log", false)) {
+                    val packages = intent.getStringExtra("packages").orEmpty().split(',').map { it.trim() }.filter { it.isNotEmpty() }
+                    PauseNearAppsStore.setPackages(context, packages.toSet())
+                }
+                Log.i("PhoneWhisper", "DEBUG_PAUSE_NEAR_APPS list=${PauseNearAppsStore.packages(context).sorted()}")
             }
             "com.trevornk.ramblr.DEBUG_PLAY_STOP" -> {
                 player?.release()

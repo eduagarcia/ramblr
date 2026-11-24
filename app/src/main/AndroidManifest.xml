@@ -34,6 +34,18 @@
     <uses-permission
         android:name="android.permission.WRITE_SECURE_SETTINGS"
         tools:ignore="ProtectedPermissions" />
+    <!-- Pause near apps (PauseNearApps.kt, off unless the user lists an app): the watcher that
+         turns the accessibility service back on is a `specialUse` foreground service, since
+         nothing else keeps the process alive while that service is off. It learns that the user
+         left the listed app from usage events, which needs the "usage access" special permission
+         (never granted at install: the user turns it on in Settings, or over adb with
+         `appops set com.trevornk.ramblr GET_USAGE_STATS allow`). RECEIVE_BOOT_COMPLETED lets a
+         pause interrupted by a restart be undone. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+    <uses-permission
+        android:name="android.permission.PACKAGE_USAGE_STATS"
+        tools:ignore="ProtectedPermissions" />
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
 
     <application
         android:name=".RamblrApp"
@@ -273,6 +285,24 @@
              for model downloads; `microphone` is deliberately NOT used (capture has ended, and it
              would be subject to the while-in-use background-start restriction).
              Not exported: only this app starts it. See docs/adr/0002-background-transcription.md. -->
+        <service
+            android:name=".PauseWatchService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Turns the app's accessibility service back on after the user leaves an app they chose to pause it for" />
+        </service>
+        <receiver
+            android:name=".PauseRecoveryReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+            </intent-filter>
+        </receiver>
+        <activity android:name=".PauseNearAppsActivity" android:exported="false" />
+
         <service
             android:name=".BackgroundTranscriptionService"
             android:exported="false"

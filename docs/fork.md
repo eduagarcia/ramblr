@@ -22,6 +22,7 @@ with untouched settings behaves like the original.
 | **Snippets before cleanup.** Snippets used as fixed replacements ("Open Sense" → "OPNSense") can also be applied to the transcript before cleanup, so the LLM reads the right word. The pass on the final text still runs. | `SnippetsBeforeCleanupToggle` | Settings → Words and snippets → Snippets → "Also apply before AI cleanup" |
 | **Dictation queue.** The next dictation can start while the previous one is still transcribed and cleaned. The texts are inserted in the order the dictations ended, each where the cursor is at that moment. The ring keeps its spinner while something is pending. | `DictationQueue`, `DictationQueueToggle` | Settings → Recording → "Queue dictations" |
 | **Transcription retries and a fallback model.** A request that is rate limited (HTTP 429), hits an overloaded or unreachable server (502, 503, 504, 520 to 524) or gets no answer is sent again, waiting 1 s, then 2 s (or the server's `Retry-After` when longer, 5 s at most). When the retries run out, a second model is asked once at the same provider with the same key, without the vocabulary. A bad request, a refused key and any credit or billing error are never repeated and never go to the fallback. | `TranscriptionRetry`, `TranscriberClient.transcribeWithRetries` | Settings → Recording → "Transcription retries" and "Fallback transcription model" (0 and none by default) |
+| **Pause near apps.** The accessibility service turns itself off the moment a listed app comes to the front and back on when the user leaves it. For banking apps that warn about, or refuse to run next to, an accessibility service they do not know. | `PauseNearApps`, `PauseWatchService`, `PauseNearAppsActivity` | Settings → Privacy → "Pause near apps" (empty by default; needs the two grants below) |
 | **Personal defaults.** One optional asset pre-configures a private build: providers and keys, language, vocabulary, replacements, cleanup prompt, any other preference. | `PersonalDefaults`, `RamblrApp` | `personal/assets/personal_defaults.json` |
 
 The queue covers the floating icon with OpenAI-compatible cloud transcription. A dictation that
@@ -51,6 +52,38 @@ after the retries and the fallback, as before.
   status and the response body (first 2000 characters). No audio, no transcript. Settings →
   Data & logs → "Share transcription failures log" sends it to another app.
 - logcat, tag `PhoneWhisper`: `Transcription request failed: ...` per failed request.
+
+### Pause near apps
+
+The original project's exclusion list only keeps Ramblr quiet in an app; the service stays
+enabled, and a banking app that looks at the enabled accessibility services still sees it. This
+is the "Turn Ramblr off" switch done automatically:
+
+1. The service listens for windows coming to the front (only while the list has entries). When
+   one belongs to a listed app, it starts a small foreground service, the watcher, and disables
+   itself. Measured on a Galaxy S23 Ultra: 230 ms after the launch, before the app's first frame.
+2. The watcher shows a "Ramblr paused" notification and reads the system's usage events to see
+   which app is in front. Once the user has been out of the listed apps for 1.5 s, it puts the
+   service back in `enabled_accessibility_services` and stops (about 3 s after leaving). A
+   permission or biometric prompt over the app, another listed app, or the screen going off
+   while the app is in front does not count as leaving. Tapping the notification turns Ramblr
+   back on at once.
+
+It needs two things an app cannot give itself, granted once from a computer:
+
+```sh
+adb shell pm grant $P android.permission.WRITE_SECURE_SETTINGS   # lets Ramblr switch its own service back on
+adb shell appops set $P GET_USAGE_STATS allow                    # "usage access": lets the watcher see the app in front
+```
+
+Without the first, Ramblr never pauses (it could not come back). Without the second, it pauses
+and stays off until the notification is tapped. Run the second one again after the first
+install of a build that declares the permission. A pause interrupted by an app update or a
+restart is undone when the app next starts.
+
+What it cannot promise: a banking app that reads the enabled services in the first instant of
+its start may still see Ramblr once, and one that objects to the app merely being installed is
+not helped by this at all.
 
 ## Personal defaults
 
@@ -82,7 +115,9 @@ the fork's changes.
 It maps `[asr-sidecar]` to the transcription provider, `transcription_retries` and
 `transcription_fallback_model` to its retries and fallback model, `[llm]` and `llm_instruction`
 to the cleanup provider and style (with whisrs' own vocabulary sentence), `vocabulary`,
-`[replacements]`, `language`, and `[input] queue` to the dictation queue. `--pref KEY=VALUE` sets
+`[replacements]`, `language`, and `[input] queue` to the dictation queue.
+`--pause-near-app PACKAGE` (repeatable) fills the "pause near apps" list. Keep the exact command
+of a phone in `personal/regenerate.sh` (gitignored), so the next rebuild does not lose its flags. `--pref KEY=VALUE` sets
 any other preference of the app by its key.
 
 ## Building and installing
@@ -132,6 +167,8 @@ The debug build's `DebugDeliverReceiver` (shell-only, see its header) has two ac
 - `DEBUG_TRANSCRIPTION_FAULTS --es statuses 429,429`: the next transcription requests fail with
   those HTTP statuses without being sent, one per request. `429,429` exercises two retries and
   then the real provider; `429,429,429` (with two retries configured) the real fallback model.
+- `DEBUG_PAUSE_NEAR_APPS --es packages a.b,c.d`: replaces the "pause near apps" list, to test the
+  pause with a harmless app (a calculator) instead of a bank. Put the real list back afterwards.
 
 ```sh
 adb push clip.wav /data/local/tmp/ && adb shell run-as $P cp /data/local/tmp/clip.wav files/
@@ -149,7 +186,8 @@ git checkout eduagarcia && git merge main
 ```
 
 The fork keeps its code in new files where it can (`DictationQueue.kt`, `PersonalDefaults.kt`,
-`CleanupTimeout.kt`, `SnippetsBeforeCleanupToggle.kt`, `TranscriptionRetry.kt`, `RamblrApp.kt`) and touches the original
+`CleanupTimeout.kt`, `SnippetsBeforeCleanupToggle.kt`, `TranscriptionRetry.kt`, `PauseNearApps.kt`,
+`PauseWatchService.kt`, `RamblrApp.kt`) and touches the original
 ones in few places: `TranscriberClient`, `PostProcessor`, `ProviderChain*`, `CleanupWaterfall*`,
 `DictationRuntime` (queue hand-off in `transcribeApi`, `dictationStylePrompt`), the accessibility
 service's runtime listener, and two settings screens.

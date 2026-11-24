@@ -16,5 +16,8 @@ first: what the fork changes, how to build, how to set a phone up and test on it
   tests with `testGithubDebugUnitTest`. JDK 17; SDK path and `ramblr.buildRoot` in
   `local.properties` (see docs/fork.md).
 - **The owner's phone.** Regenerate `personal/assets/personal_defaults.json` with
-  `scripts/personal-defaults-from-whisrs.py` after the desktop whisrs configuration changes, then
-  rebuild and `adb install -r`. Test with `DEBUG_NEXT_AUDIO` rather than playing audio aloud.
+  `./personal/regenerate.sh` after the desktop whisrs configuration changes (it holds the exact
+  flags of his build, the list of apps Ramblr pauses near included; gitignored), then rebuild and
+  `adb install -r`. Test with `DEBUG_NEXT_AUDIO` rather than playing audio aloud, and the pause
+  with `DEBUG_PAUSE_NEAR_APPS` and a harmless app, never by opening his banking apps. Look at
+  what is on his screen first: he may be using the phone.
