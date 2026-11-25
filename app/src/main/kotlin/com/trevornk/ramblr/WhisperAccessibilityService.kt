@@ -1169,7 +1169,12 @@ open class WhisperAccessibilityService : AccessibilityService() {
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         val type = event?.eventType ?: return
         // A listed app came to the front: the service turns itself off (see PauseNearApps).
-        if (PauseNearApps.onAccessibilityEvent(this, type, event.packageName?.toString()) { currentForegroundPackageName() }) return
+        if (PauseNearApps.onAccessibilityEvent(
+                this, type, event.packageName?.toString(),
+                activeWindowPackage = { currentForegroundPackageName() },
+                tappedTexts = { event.text + event.contentDescription },
+            )
+        ) return
         val mode = RingVisibilityMode.read(this)
         if (!RingEventTypes.isRelevant(mode, type)) return
         val present = isKeyboardShowing() || (mode == RingVisibilityMode.TEXT_FIELD && isTextFieldFocused())
@@ -1197,7 +1202,10 @@ open class WhisperAccessibilityService : AccessibilityService() {
         ringModePrefsListener?.let { prefs.unregisterOnSharedPreferenceChangeListener(it) }
         val listener = android.content.SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
             if (key == RingVisibilityMode.KEY) onRingVisibilityModeChanged()
-            if (key == PauseNearAppsStore.KEY_PACKAGES) ringEventSubscription.apply(RingVisibilityMode.read(this))
+            if (key == PauseNearAppsStore.KEY_PACKAGES) {
+                ringEventSubscription.apply(RingVisibilityMode.read(this))
+                PauseNearApps.warmUp(this)
+            }
             // The keyboard (or Settings) changed the shared "Translate to" choice: keep the badge true.
             if (key == KeyboardTranslation.KEY_TARGET || key == KeyboardTranslation.KEY_LANGUAGES) refreshTranslationBadge()
         }

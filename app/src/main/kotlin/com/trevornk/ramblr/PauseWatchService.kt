@@ -37,6 +37,7 @@ class PauseWatchService : Service() {
             val now = System.currentTimeMillis()
             val foreground = PauseNearApps.newestForeground(this@PauseWatchService, lastCheckMs, now) ?: lastForeground
             lastCheckMs = now
+            if (foreground != lastForeground) Log.i(TAG, "Pause watcher: $foreground is in front")
             lastForeground = foreground
             if (detector?.hasLeft(foreground, now) == true) {
                 finish("left ${pausedFor ?: "the app"} for $foreground")
@@ -66,9 +67,15 @@ class PauseWatchService : Service() {
         isRunning = true
         handler.removeCallbacks(check)
         if (PauseNearApps.hasUsageAccess(this)) {
-            detector = PauseLeaveDetector(PauseNearAppsStore.packages(this) + target)
-            lastForeground = target
-            lastCheckMs = System.currentTimeMillis()
+            val now = System.currentTimeMillis()
+            // Paused on the tap that launches the app: it is not in front yet, and must show up.
+            val anticipated = intent?.getBooleanExtra(EXTRA_ANTICIPATED, false) == true
+            detector = PauseLeaveDetector(
+                PauseNearAppsStore.packages(this) + target,
+                confirmByMs = if (anticipated) now + PauseLeaveDetector.CONFIRM_LAUNCH_MS else null,
+            )
+            lastForeground = if (anticipated) null else target
+            lastCheckMs = now - 500
             handler.postDelayed(check, CHECK_MS)
         } else {
             Log.w(TAG, "Paused near $target without usage access: only the notification turns Ramblr back on")
@@ -104,6 +111,7 @@ class PauseWatchService : Service() {
         const val NOTIFICATION_ID = 0x9A05
         const val ACTION_RESUME = "com.trevornk.ramblr.action.RESUME_AFTER_PAUSE"
         const val EXTRA_PACKAGE = "package"
+        const val EXTRA_ANTICIPATED = "anticipated"
         private const val CHECK_MS = 700L
         private const val CHECK_SCREEN_OFF_MS = 10_000L
 
@@ -117,8 +125,9 @@ class PauseWatchService : Service() {
          * notification with the same "turn back on" tap is posted instead, so a pause never
          * leaves the user without a way back.
          */
-        fun start(context: Context, packageName: String) {
-            val intent = Intent(context, PauseWatchService::class.java).putExtra(EXTRA_PACKAGE, packageName)
+        fun start(context: Context, packageName: String, anticipated: Boolean = false) {
+            val intent = Intent(context, PauseWatchService::class.java)
+                .putExtra(EXTRA_PACKAGE, packageName).putExtra(EXTRA_ANTICIPATED, anticipated)
             try {
                 context.startForegroundService(intent)
             } catch (e: Exception) {

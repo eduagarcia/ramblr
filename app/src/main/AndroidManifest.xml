@@ -47,6 +47,20 @@
         tools:ignore="ProtectedPermissions" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
 
+    <!-- Pause near apps: recognizing the tap that launches a listed app needs the name the
+         launcher shows for it, and which app the launcher is. These two queries make launchable
+         apps and home apps visible to Ramblr, and nothing else. -->
+    <queries>
+        <intent>
+            <action android:name="android.intent.action.MAIN" />
+            <category android:name="android.intent.category.LAUNCHER" />
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.MAIN" />
+            <category android:name="android.intent.category.HOME" />
+        </intent>
+    </queries>
+
     <application
         android:name=".RamblrApp"
         android:allowBackup="true"

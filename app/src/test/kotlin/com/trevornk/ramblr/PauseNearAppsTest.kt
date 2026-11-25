@@ -76,6 +76,43 @@ class PauseNearAppsTest {
         assertTrue(detector.hasLeft("com.example.launcher", 61_500))
     }
 
+    // --- a pause made on the tap that launches the app ------------------------------------------
+
+    @Test fun `an anticipated pause holds until the app shows up, then follows the usual rule`() {
+        val detector = PauseLeaveDetector(listed, settleMs = 1500, confirmByMs = 8000)
+        // Still the launcher in front, or nothing known yet: the app is starting.
+        assertFalse(detector.hasLeft(null, 500))
+        assertFalse(detector.hasLeft("com.example.launcher", 3000))
+        assertFalse(detector.hasLeft(bank, 4000))
+        // From here it is an ordinary pause.
+        assertFalse(detector.hasLeft(bank, 60_000))
+        assertFalse(detector.hasLeft("com.example.launcher", 61_000))
+        assertTrue(detector.hasLeft("com.example.launcher", 62_500))
+    }
+
+    @Test fun `an anticipated launch that never happens ends the pause at the deadline`() {
+        val detector = PauseLeaveDetector(listed, settleMs = 1500, confirmByMs = 8000)
+        assertFalse(detector.hasLeft("com.example.launcher", 7999))
+        assertTrue(detector.hasLeft("com.example.launcher", 8000))
+        val unknown = PauseLeaveDetector(listed, settleMs = 1500, confirmByMs = 8000)
+        assertFalse(unknown.hasLeft(null, 7999))
+        assertTrue(unknown.hasLeft(null, 8000))
+    }
+
+    @Test fun `the tapped icon or recent-apps card is matched to a listed app by the name shown`() {
+        val labels = LaunchLabels.of(listed) { pkg ->
+            if (pkg == bank) listOf("Example Bank", "Bank") else listOf("Broker Pro")
+        }
+        assertEquals(bank, labels.packageFor(listOf("Example Bank", "Example Bank")))
+        assertEquals(bank, labels.packageFor(listOf(null, "bank")))
+        // A home-screen description with a badge count.
+        assertEquals(bank, labels.packageFor(listOf("Example Bank, 2 notifications")))
+        assertEquals(broker, labels.packageFor(listOf("", " broker pro ")))
+        assertEquals(null, labels.packageFor(listOf("Chat", "Chat, 8 notifications")))
+        assertEquals(null, labels.packageFor(listOf(null, "")))
+        assertEquals(null, labels.packageFor(emptyList()))
+    }
+
     // --- the list ------------------------------------------------------------------------------
 
     @Test fun `the list is empty by default and round-trips, trimmed`() {

@@ -84,12 +84,25 @@ object PauseNearAppsStore {
 class PauseLeaveDetector(
     private val listed: Set<String>,
     private val settleMs: Long = DEFAULT_SETTLE_MS,
+    /**
+     * Set for a pause made ahead of the app, on the tap that launches it: the time by which a
+     * listed app must have come to the front. If none has, the tap was not a launch after all
+     * (it opened a folder, a menu, another app of the same name) and the pause ends. Null for a
+     * pause made with the app already in front.
+     */
+    private val confirmByMs: Long? = null,
 ) {
     private var awaySinceMs: Long? = null
+    private var confirmed = confirmByMs == null
 
-    /** True once the user has been out of the listed apps for [settleMs]. [foreground] null means
-     *  "unknown at this check" and changes nothing. */
+    /** True once the user has been out of the listed apps for [settleMs], or an anticipated
+     *  launch did not happen in time. [foreground] null means "unknown at this check" and changes
+     *  nothing but the passing of time. */
     fun hasLeft(foreground: String?, nowMs: Long): Boolean {
+        if (!confirmed) {
+            if (foreground != null && foreground in listed) confirmed = true
+            else return confirmByMs != null && nowMs >= confirmByMs
+        }
         if (foreground == null) return false
         if (foreground in listed || foreground in TRANSIENT_PACKAGES) {
             awaySinceMs = null
@@ -102,6 +115,9 @@ class PauseLeaveDetector(
     companion object {
         const val DEFAULT_SETTLE_MS = 1_500L
 
+        /** How long a tapped launch gets to bring its app to the front. */
+        const val CONFIRM_LAUNCH_MS = 8_000L
+
         /** Surfaces that come to the front on top of an app the user is still in. */
         val TRANSIENT_PACKAGES: Set<String> = setOf(
             "android",
@@ -111,6 +127,36 @@ class PauseLeaveDetector(
             "com.samsung.android.permissioncontroller",
             "com.samsung.android.biometrics.app.setting",
         )
+    }
+}
+
+/**
+ * The names under which the launcher shows the listed apps, to recognize the tap that launches
+ * one. A name is compared without case, and a description such as "Bank, 2 notifications" also
+ * counts by what comes before its first comma.
+ */
+class LaunchLabels(private val packageByLabel: Map<String, String>) {
+    fun packageFor(tappedTexts: List<CharSequence?>): String? {
+        for (text in tappedTexts) {
+            val whole = text?.toString()?.trim()?.lowercase().orEmpty()
+            if (whole.isEmpty()) continue
+            packageByLabel[whole]?.let { return it }
+            packageByLabel[whole.substringBefore(',').trim()]?.let { return it }
+        }
+        return null
+    }
+
+    companion object {
+        fun of(packages: Set<String>, labelsOf: (String) -> List<CharSequence>): LaunchLabels {
+            val map = HashMap<String, String>()
+            for (pkg in packages.sorted()) {
+                for (label in labelsOf(pkg)) {
+                    val key = label.toString().trim().lowercase()
+                    if (key.isNotEmpty()) map.putIfAbsent(key, pkg)
+                }
+            }
+            return LaunchLabels(map)
+        }
     }
 }
 
@@ -126,9 +172,18 @@ object PauseNearApps {
     const val WINDOW_EVENTS: Int =
         AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED or AccessibilityEvent.TYPE_WINDOWS_CHANGED
 
+    /**
+     * Everything the service listens to for this feature. A window event arrives when the app's
+     * first window does, a few hundred milliseconds after its process started, which is too late
+     * for an app that looks at the enabled accessibility services while it starts. The tap on its
+     * icon in the launcher, or on its card in the recent apps, arrives before the launch begins
+     * (4 ms before, measured on a Galaxy S23 Ultra), so taps are listened to as well.
+     */
+    const val SIGNAL_EVENTS: Int = WINDOW_EVENTS or AccessibilityEvent.TYPE_VIEW_CLICKED
+
     /** What the accessibility service must listen to for this feature: nothing unless it can run. */
     fun eventTypes(context: Context): Int =
-        if (PauseNearAppsStore.packages(context).isNotEmpty() && InvocationSecureSettings.canWrite(context)) WINDOW_EVENTS else 0
+        if (PauseNearAppsStore.packages(context).isNotEmpty() && InvocationSecureSettings.canWrite(context)) SIGNAL_EVENTS else 0
 
     /** Whether [packageName] coming to the front must pause Ramblr. */
     fun shouldPause(packageName: String?, listed: Set<String>, canReEnable: Boolean): Boolean =
@@ -137,23 +192,84 @@ object PauseNearApps {
     /**
      * Called by the accessibility service for every event, before anything else. Returns true
      * when it paused: the service is then disabling itself and the event needs no more handling.
-     * [activeWindowPackage] is asked only when the event itself does not name a listed app.
+     * [activeWindowPackage] is asked only when a window event does not itself name a listed app,
+     * [tappedTexts] (the tapped view's text and description) only for a tap in the launcher.
      */
     fun onAccessibilityEvent(
         service: WhisperAccessibilityService,
         eventType: Int,
         eventPackage: String?,
         activeWindowPackage: () -> String?,
+        tappedTexts: () -> List<CharSequence?>,
     ): Boolean {
         if (pauseInFlight) return true
-        if (eventType and WINDOW_EVENTS == 0) return false
+        if (eventType and SIGNAL_EVENTS == 0) return false
         val listed = PauseNearAppsStore.packages(service)
         if (listed.isEmpty()) return false
         val canReEnable = InvocationSecureSettings.canWrite(service)
+        if (eventType == AccessibilityEvent.TYPE_VIEW_CLICKED) {
+            // Ahead of the launch. Only with usage access: the watcher must be able to tell that
+            // the app really came to the front, or a tap that was no launch would pause for good.
+            if (!canReEnable || eventPackage == null || eventPackage != homePackage(service)) return false
+            if (!hasUsageAccess(service)) return false
+            val launching = launchLabels(service, listed).packageFor(tappedTexts()) ?: return false
+            return pause(service, launching, anticipated = true)
+        }
         val trigger = eventPackage?.takeIf { shouldPause(it, listed, canReEnable) }
             ?: activeWindowPackage()?.takeIf { shouldPause(it, listed, canReEnable) }
             ?: return false
-        return pause(service, trigger)
+        return pause(service, trigger, anticipated = false)
+    }
+
+    /** The default home app: where a tap on an icon or on a recent-apps card comes from. */
+    @Volatile private var cachedHome: String? = null
+
+    private fun homePackage(context: Context): String? {
+        cachedHome?.let { return it }
+        val home = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_HOME)
+        return runCatching {
+            context.packageManager.resolveActivity(home, android.content.pm.PackageManager.MATCH_DEFAULT_ONLY)?.activityInfo?.packageName
+        }.getOrNull()?.takeIf { it != "android" }?.also { cachedHome = it }
+    }
+
+    /** The names the launcher shows for [labelsFor]'s apps; swapped whole by [warmUp]. */
+    @Volatile private var labelsFor: Set<String>? = null
+    @Volatile private var labels = LaunchLabels(emptyMap())
+
+    /**
+     * The names for [listed]. They are read ahead by [warmUp], because reading them asks the
+     * package manager twice per app and a tap must be answered before the launch gets going; a
+     * tap that comes before they are ready finds none and is left to the window event.
+     */
+    private fun launchLabels(context: Context, listed: Set<String>): LaunchLabels {
+        if (labelsFor == listed) return labels
+        warmUp(context)
+        return LaunchLabels(emptyMap())
+    }
+
+    /**
+     * Reads, off the main thread, what the tap path needs: the home app and the listed apps'
+     * names. Called when the service connects and when the list changes.
+     */
+    fun warmUp(context: Context) {
+        val app = context.applicationContext
+        val listed = PauseNearAppsStore.packages(app)
+        if (listed.isEmpty() || labelsFor == listed) return
+        kotlin.concurrent.thread(name = "PauseNearApps-labels") {
+            homePackage(app)
+            val pm = app.packageManager
+            val launcher = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
+            val read = LaunchLabels.of(listed) { pkg ->
+                val names = ArrayList<CharSequence>()
+                // The app's own name (what the recent apps show) and its launcher entries' names
+                // (what the home screen shows): they differ for some apps.
+                runCatching { names += pm.getApplicationLabel(pm.getApplicationInfo(pkg, 0)) }
+                runCatching { pm.queryIntentActivities(Intent(launcher).setPackage(pkg), 0).forEach { names += it.loadLabel(pm) } }
+                names
+            }
+            labels = read
+            labelsFor = listed
+        }
     }
 
     /**
@@ -167,8 +283,10 @@ object PauseNearApps {
         if (PauseNearAppsStore.activePackage(service) != null) PauseNearAppsStore.setActivePackage(service, null)
         if (PauseWatchService.isRunning) service.stopService(Intent(service, PauseWatchService::class.java))
         val listed = PauseNearAppsStore.packages(service)
+        labelsFor = null // read the names again: an app may have been installed or renamed since
+        warmUp(service)
         if (!shouldPause(activeWindowPackage, listed, InvocationSecureSettings.canWrite(service))) return false
-        return pause(service, activeWindowPackage!!)
+        return pause(service, activeWindowPackage!!, anticipated = false)
     }
 
     /**
@@ -177,11 +295,11 @@ object PauseNearApps {
      * Recorded as a deliberate turn-off, so the "Ramblr was turned off" recovery notice (#254)
      * stays quiet.
      */
-    private fun pause(service: WhisperAccessibilityService, packageName: String): Boolean {
-        Log.i(TAG, "Pausing near $packageName: turning the accessibility service off")
+    private fun pause(service: WhisperAccessibilityService, packageName: String, anticipated: Boolean): Boolean {
+        Log.i(TAG, "Pausing near $packageName${if (anticipated) " (tapped in the launcher)" else ""}: turning the accessibility service off")
         pauseInFlight = true
         PauseNearAppsStore.setActivePackage(service, packageName)
-        PauseWatchService.start(service, packageName)
+        PauseWatchService.start(service, packageName, anticipated)
         InvocationGuardRail.dismissBanner(service)
         InvocationGuardRail.recordUserTurnedOff(service)
         service.disableSelf()

@@ -59,15 +59,23 @@ The original project's exclusion list only keeps Ramblr quiet in an app; the ser
 enabled, and a banking app that looks at the enabled accessibility services still sees it. This
 is the "Turn Ramblr off" switch done automatically:
 
-1. The service listens for windows coming to the front (only while the list has entries). When
-   one belongs to a listed app, it starts a small foreground service, the watcher, and disables
-   itself. Measured on a Galaxy S23 Ultra: 230 ms after the launch, before the app's first frame.
-2. The watcher shows a "Ramblr paused" notification and reads the system's usage events to see
+1. The service listens for two things, only while the list has entries:
+   - a tap in the home app on something named like a listed app: its icon, or its card in the
+     recent apps. This arrives before the launch begins, so the service is off before the app's
+     process exists. Measured on a Galaxy S23 Ultra: off 0 to 10 ms before the system starts the
+     launch, about 40 ms before the app's process starts.
+   - a window of a listed app coming to the front, for every other way in (a notification, a
+     link from another app). This arrives with the app's first window, 230 to 380 ms after the
+     launch: too late for an app that reads the enabled services while it starts. One banking
+     app warned on the first open and not on the second, before the tap was handled.
+2. Either way it first starts a small foreground service, the watcher, then disables itself.
+3. The watcher shows a "Ramblr paused" notification and reads the system's usage events to see
    which app is in front. Once the user has been out of the listed apps for 1.5 s, it puts the
-   service back in `enabled_accessibility_services` and stops (about 3 s after leaving). A
+   service back in `enabled_accessibility_services` and stops (about 2.5 s after leaving). A
    permission or biometric prompt over the app, another listed app, or the screen going off
-   while the app is in front does not count as leaving. Tapping the notification turns Ramblr
-   back on at once.
+   while the app is in front does not count as leaving. A tap that turns out not to launch the
+   app (nothing listed in front within 8 s) ends the pause. Tapping the notification turns
+   Ramblr back on at once.
 
 It needs two things an app cannot give itself, granted once from a computer:
 
@@ -77,13 +85,18 @@ adb shell appops set $P GET_USAGE_STATS allow                    # "usage access
 ```
 
 Without the first, Ramblr never pauses (it could not come back). Without the second, it pauses
-and stays off until the notification is tapped. Run the second one again after the first
+only on the window event and stays off until the notification is tapped. Run the second one again after the first
 install of a build that declares the permission. A pause interrupted by an app update or a
 restart is undone when the app next starts.
 
-What it cannot promise: a banking app that reads the enabled services in the first instant of
-its start may still see Ramblr once, and one that objects to the app merely being installed is
-not helped by this at all.
+To know the name the launcher shows for each listed app, and which app the launcher is, the
+manifest declares two `<queries>` (launchable apps and home apps). The original project avoids
+package visibility altogether; this fork takes that much.
+
+What it cannot promise: an app opened from a notification or a link still gets the late
+signal, so one that reads the enabled services while it starts may see Ramblr that once
+(closing and opening it again works, since Ramblr is off by then). And an app that objects to
+Ramblr merely being installed is not helped by this at all.
 
 ## Personal defaults
 
